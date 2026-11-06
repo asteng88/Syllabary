@@ -1,0 +1,66 @@
+{
+  "id": "ev_e665a2016c38346aab4811057758d9a456f16ce0ea918db70d945b460a018207",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_strings_find",
+  "params": {
+    "case_sensitive": false,
+    "limit": 40,
+    "mode": "literal",
+    "offset": 0,
+    "pattern": "TWAIN"
+  },
+  "result": {
+    "matches": [
+      {
+        "address": "0x8ac708",
+        "references": [
+          {
+            "from": "0x8ed054",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "TWAIN_32.DLL"
+      },
+      {
+        "address": "0x8ac718",
+        "references": [],
+        "section": ".rdata",
+        "text": "TWAIN"
+      },
+      {
+        "address": "0x8ac720",
+        "references": [],
+        "section": ".rdata",
+        "text": "TWAIN_32"
+      }
+    ],
+    "total": 3
+  },
+  "summary": "3 strings match \"TWAIN\".",
+  "confidence": "observed",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "builtin",
+    "engine_version": "0.3.0",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "data_sections_only",
+      "message": "only strings stored in the file are searched (absence is not proof)"
+    }
+  ],
+  "coverage": {
+    "status": "complete",
+    "examined": 3,
+    "total": 3
+  },
+  "locations": [],
+  "links": []
+}

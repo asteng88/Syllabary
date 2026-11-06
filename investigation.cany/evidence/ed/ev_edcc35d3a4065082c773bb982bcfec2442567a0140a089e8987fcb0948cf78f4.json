@@ -1,0 +1,586 @@
+{
+  "id": "ev_edcc35d3a4065082c773bb982bcfec2442567a0140a089e8987fcb0948cf78f4",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_pe_resources_list",
+  "params": {
+    "max_entries": 400,
+    "path": null
+  },
+  "result": {
+    "entries": [
+      {
+        "codepage": 0,
+        "file_offset": 5181456,
+        "language": 1033,
+        "name": "7000",
+        "rva": "0x4f9010",
+        "sha256": "be1c7b3a03c32f289e093b424635a2924879befe17c9c31d7263a9ee5c7a81bc",
+        "size": 264,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5181720,
+        "language": 1033,
+        "name": "7001",
+        "rva": "0x4f9118",
+        "sha256": "d0efb9dfa174cf730723dc32ff3ab2e5d4b295cb01f971832c24063dee854cbf",
+        "size": 264,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5181984,
+        "language": 1033,
+        "name": "7002",
+        "rva": "0x4f9220",
+        "sha256": "8c0efa1f5eda3ab8b81b849e7c2e144835f3c8a81595dc7b3bd8be2634435b5c",
+        "size": 264,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5182512,
+        "language": 1033,
+        "name": "7003",
+        "rva": "0x4f9430",
+        "sha256": "5f967197fcfda2aea96a1c51b127d9188ae3246a18e307e2d4a0d57382aae8f6",
+        "size": 312,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5182824,
+        "language": 1033,
+        "name": "7004",
+        "rva": "0x4f9568",
+        "sha256": "fbb5e0287d7e26840799f54e5467c48cd6dc9c7b1ac1c5c6de4e89a589d8fe99",
+        "size": 312,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5183136,
+        "language": 1033,
+        "name": "7005",
+        "rva": "0x4f96a0",
+        "sha256": "4405454e67d04babc8fef7237cf29143f68aafe16bb0684f7c3ba5d0f1f0eb7a",
+        "size": 312,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5183760,
+        "language": 1033,
+        "name": "7006",
+        "rva": "0x4f9910",
+        "sha256": "d661f7ad4d5594b9f02c0e529fa5948590dfbd89e180610e6ca0ba16defb0b85",
+        "size": 1220,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5184984,
+        "language": 1033,
+        "name": "7007",
+        "rva": "0x4f9dd8",
+        "sha256": "c6e78ce64815cf4bb0f146dc2e803e7cedf23dfdb9d647c363d90e21fc2ae787",
+        "size": 1208,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5186192,
+        "language": 1033,
+        "name": "7008",
+        "rva": "0x4fa290",
+        "sha256": "37d33ecef78afdacd3bdd5ddcc95b56d970dabac919851577ff10181623f79bd",
+        "size": 296,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5190608,
+        "language": 1033,
+        "name": "7009",
+        "rva": "0x4fb3d0",
+        "sha256": "e4549b84b1cda37f62a7f521512072287a0a92fb7564865c36c509e31c745ebe",
+        "size": 128,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5186744,
+        "language": 1033,
+        "name": "7010",
+        "rva": "0x4fa4b8",
+        "sha256": "c6154686fd62f2ddc9ed278897aa4c2cd86d3fc916d6902064d3380bcc4f710b",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5187000,
+        "language": 1033,
+        "name": "7011",
+        "rva": "0x4fa5b8",
+        "sha256": "de247acb06e9be173b5a7435f1fa605b5daa1f3ffe0fdc161d7e0f6227d6aeed",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5187256,
+        "language": 1033,
+        "name": "7012",
+        "rva": "0x4fa6b8",
+        "sha256": "75508ce525b2142870dbb7c66499302afbcf00cc2b554e3486301c3ea10facc3",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5187512,
+        "language": 1033,
+        "name": "7013",
+        "rva": "0x4fa7b8",
+        "sha256": "3acd63b41fcc51bb09c88880c2b721883968740c688be494808653a24196867a",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5187768,
+        "language": 1033,
+        "name": "7014",
+        "rva": "0x4fa8b8",
+        "sha256": "e33f28e954c4a8b791d1483a252793b09001fa42b50272a718ea14802d723c6a",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5188024,
+        "language": 1033,
+        "name": "7015",
+        "rva": "0x4fa9b8",
+        "sha256": "4fe750c650e505269364c1be7512d838efa6dce84e82ee308f5c93d1b8cda0eb",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5186488,
+        "language": 1033,
+        "name": "7016",
+        "rva": "0x4fa3b8",
+        "sha256": "bd6bd57e5dc01292baf0f3a49fd2e153c1d38d54797ea200508ab85100a92c8d",
+        "size": 256,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5182248,
+        "language": 1033,
+        "name": "7017",
+        "rva": "0x4f9328",
+        "sha256": "8241bdd4865da14bf6926dfd5b6e78e210c6413e6216d28406bd968a1818e65c",
+        "size": 264,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5183448,
+        "language": 1033,
+        "name": "7018",
+        "rva": "0x4f97d8",
+        "sha256": "2c356e812ce5898595bb9d64de93ed0ff7b74ee8e4374f2620daa3a0c3ecbfb6",
+        "size": 312,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5181096,
+        "language": 1033,
+        "name": "7019",
+        "rva": "0x4f8ea8",
+        "sha256": "aca982b39e17c436f39052590fcea1e2ad1a98f727eac22930d9a05d079943e1",
+        "size": 176,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5181272,
+        "language": 1033,
+        "name": "7020",
+        "rva": "0x4f8f58",
+        "sha256": "7f5149e60f89e90b7f4edcfc68a0e45ad66d2d4f9f8bf51bbebe110548ad837f",
+        "size": 184,
+        "type": "RT_BITMAP"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5188280,
+        "language": 1033,
+        "name": "10",
+        "rva": "0x4faab8",
+        "sha256": "0d08ad376794f69b3c125722e42d9f7da9a3acab40c3f6281541191fa29fab37",
+        "size": 748,
+        "type": "RT_CURSOR"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5189056,
+        "language": 1033,
+        "name": "11",
+        "rva": "0x4fadc0",
+        "sha256": "7290ed577b202d9033ffdb6eb9e7e982154cab30c9c2c0a7e1167dd5bcafbe7e",
+        "size": 748,
+        "type": "RT_CURSOR"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5189832,
+        "language": 1033,
+        "name": "12",
+        "rva": "0x4fb0c8",
+        "sha256": "fffe9142cb4f83e8b639a903074bc1b319dc402164f174d67b1abb9e6204c039",
+        "size": 748,
+        "type": "RT_CURSOR"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5189032,
+        "language": 1033,
+        "name": "7021",
+        "rva": "0x4fada8",
+        "sha256": "dfe820215b7cc0ff269f99c4c640fa30be68a19088444bda9ed7a76b862e7e42",
+        "size": 20,
+        "type": "RT_GROUP_CURSOR"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5189808,
+        "language": 1033,
+        "name": "7022",
+        "rva": "0x4fb0b0",
+        "sha256": "881e281c1ae8d587e190f8c76e97c12ff515eda40c68a948918b449f535a4b24",
+        "size": 20,
+        "type": "RT_GROUP_CURSOR"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5190584,
+        "language": 1033,
+        "name": "7023",
+        "rva": "0x4fb3b8",
+        "sha256": "eedd8e76af4e3203da958a5431430787d444aa597e092a86e443fc1d2bbe0ace",
+        "size": 20,
+        "type": "RT_GROUP_CURSOR"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5177672,
+        "language": 1033,
+        "name": "1000",
+        "rva": "0x4f8148",
+        "sha256": "cd07dc2185fca682e34141b058a2b4794bfde621a0e355e6e7080686a8c78750",
+        "size": 34,
+        "type": "RT_GROUP_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5178752,
+        "language": 1033,
+        "name": "1037",
+        "rva": "0x4f8580",
+        "sha256": "b9526937ca2715e9b12796a65392e1913bb5c77f5e2420c78e31baf7dadac873",
+        "size": 34,
+        "type": "RT_GROUP_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5179536,
+        "language": 1033,
+        "name": "3110",
+        "rva": "0x4f8890",
+        "sha256": "4420d38956c089533731669f88ae00ee4bdf4069a53932dc180b9a5a36ac6fd4",
+        "size": 20,
+        "type": "RT_GROUP_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5180304,
+        "language": 1033,
+        "name": "3120",
+        "rva": "0x4f8b90",
+        "sha256": "0a45a6f4b326b4fe4972b61721a40371854c7404c7a45ff123cf020069c0f79a",
+        "size": 20,
+        "type": "RT_GROUP_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5181072,
+        "language": 1033,
+        "name": "3121",
+        "rva": "0x4f8e90",
+        "sha256": "68a650ddb99db6876f8864c39e1eac468b19e89df4a069c6d698e51b87621dd8",
+        "size": 20,
+        "type": "RT_GROUP_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5176592,
+        "language": 1033,
+        "name": "999",
+        "rva": "0x4f7d10",
+        "sha256": "b10e28a32eddb2ab20a46ceae59d9c0786911eb20f0c8dd2a28421f226ea2b8b",
+        "size": 34,
+        "type": "RT_GROUP_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5175552,
+        "language": 1033,
+        "name": "1",
+        "rva": "0x4f7900",
+        "sha256": "21a3e83d8253e64b78b7f4c45ce8d591c667109f107786588d9ac01f39ba5492",
+        "size": 744,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5176296,
+        "language": 1033,
+        "name": "2",
+        "rva": "0x4f7be8",
+        "sha256": "34baa4e3e9962f231571175dc6dd930a86f9999de3c1d5dc81ea203b40888071",
+        "size": 296,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5176632,
+        "language": 1033,
+        "name": "3",
+        "rva": "0x4f7d38",
+        "sha256": "50b44fcd45c4593fa8f2489eee985c46a04ff3f41f89d478dfc8b69650033846",
+        "size": 744,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5177376,
+        "language": 1033,
+        "name": "4",
+        "rva": "0x4f8020",
+        "sha256": "f1d0e682c2a7921031cf0191809a68a2a0647cedcb680735e341bf6da1c67974",
+        "size": 296,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5177712,
+        "language": 1033,
+        "name": "5",
+        "rva": "0x4f8170",
+        "sha256": "dbdcd60909f54a5d37cee40c2cb0d247de4a27a2f7de123dde8294710b648061",
+        "size": 744,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5178456,
+        "language": 1033,
+        "name": "6",
+        "rva": "0x4f8458",
+        "sha256": "1b091d320130b4d1e25ba1fc86efa461ea1529aa03adfa7b003eed699d887245",
+        "size": 296,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5178792,
+        "language": 1033,
+        "name": "7",
+        "rva": "0x4f85a8",
+        "sha256": "7259ce3d2ba4c7e99971c1efc0e705b2a9da4ac2eb9b3b6176443d4f10877784",
+        "size": 744,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5179560,
+        "language": 1033,
+        "name": "8",
+        "rva": "0x4f88a8",
+        "sha256": "412e75ceb1f443e6771d8cae0aace84634e7569be1f12cd495fcec85386ad1c8",
+        "size": 744,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5180328,
+        "language": 1033,
+        "name": "9",
+        "rva": "0x4f8ba8",
+        "sha256": "e2426355f34861832aae01149a6480930aa3faee8501249f0c20a6ec76efb51c",
+        "size": 744,
+        "type": "RT_ICON"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5191808,
+        "language": 1033,
+        "name": "629",
+        "rva": "0x4fb880",
+        "sha256": "aabf9c12a6c06825cf0e2a63940cfe954c430763e218536ccd3c8ecb3d6cc359",
+        "size": 54,
+        "type": "RT_STRING"
+      },
+      {
+        "codepage": 0,
+        "file_offset": 5190736,
+        "language": 1033,
+        "name": "1",
+        "rva": "0x4fb450",
+        "sha256": "3998990903a8469887be8bfbc5ebf3818cf9f22ae0ad5b9c5bbbee6ba65bee5b",
+        "size": 1068,
+        "type": "RT_VERSION"
+      }
+    ],
+    "icon_groups": [
+      {
+        "icons": [
+          {
+            "bit_count": 4,
+            "bytes": 744,
+            "height": 32,
+            "icon_id": 3,
+            "width": 32
+          },
+          {
+            "bit_count": 4,
+            "bytes": 296,
+            "height": 16,
+            "icon_id": 4,
+            "width": 16
+          }
+        ],
+        "name": "1000"
+      },
+      {
+        "icons": [
+          {
+            "bit_count": 4,
+            "bytes": 744,
+            "height": 32,
+            "icon_id": 5,
+            "width": 32
+          },
+          {
+            "bit_count": 4,
+            "bytes": 296,
+            "height": 16,
+            "icon_id": 6,
+            "width": 16
+          }
+        ],
+        "name": "1037"
+      },
+      {
+        "icons": [
+          {
+            "bit_count": 4,
+            "bytes": 744,
+            "height": 32,
+            "icon_id": 7,
+            "width": 32
+          }
+        ],
+        "name": "3110"
+      },
+      {
+        "icons": [
+          {
+            "bit_count": 4,
+            "bytes": 744,
+            "height": 32,
+            "icon_id": 8,
+            "width": 32
+          }
+        ],
+        "name": "3120"
+      },
+      {
+        "icons": [
+          {
+            "bit_count": 4,
+            "bytes": 744,
+            "height": 32,
+            "icon_id": 9,
+            "width": 32
+          }
+        ],
+        "name": "3121"
+      },
+      {
+        "icons": [
+          {
+            "bit_count": 4,
+            "bytes": 744,
+            "height": 32,
+            "icon_id": 1,
+            "width": 32
+          },
+          {
+            "bit_count": 4,
+            "bytes": 296,
+            "height": 16,
+            "icon_id": 2,
+            "width": 16
+          }
+        ],
+        "name": "999"
+      }
+    ],
+    "manifest": null,
+    "truncated": false,
+    "version": {
+      "file_version": "99.8.208.800",
+      "product_version": "99.8.208.800",
+      "strings": {
+        "CompanyName": "Lotus Development Corporation",
+        "FileDescription": "Lotus Word Pro",
+        "FileVersion": "99.8.0208.0800",
+        "InternalName": "WORDPRO",
+        "LegalCopyright": "© Lotus Development Corporation 1999",
+        "LegalTrademarks": "Microsoft® is a registered trademark of Microsoft Corporation. Windows is a trademark of Microsoft Corporation.",
+        "OriginalFilename": "WORDPRO.EXE",
+        "ProductName": "Lotus Word Pro",
+        "ProductVersion": "99.8.0208.0800"
+      }
+    }
+  },
+  "summary": "44 resources, 6 icon groups, product \"Lotus Word Pro\".",
+  "confidence": "observed",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "builtin",
+    "engine_version": "0.3.0",
+    "host": "windows-x86_64"
+  },
+  "limitations": [],
+  "coverage": {
+    "status": "complete",
+    "examined": 44,
+    "total": 44
+  },
+  "locations": [],
+  "links": []
+}

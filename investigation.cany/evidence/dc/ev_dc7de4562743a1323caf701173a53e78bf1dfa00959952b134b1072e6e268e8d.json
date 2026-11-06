@@ -1,0 +1,45 @@
+{
+  "id": "ev_dc7de4562743a1323caf701173a53e78bf1dfa00959952b134b1072e6e268e8d",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_function_pseudocode",
+  "params": {
+    "function": "0x452983"
+  },
+  "result": {
+    "engine": "ghidra",
+    "entry": "0x452983",
+    "function": "FUN_00452923",
+    "pseudo_code": "\r\nuint __thiscall FUN_00452923(int param_1,int param_2,short param_3)\r\n\r\n{\r\n  short sVar1;\r\n  ushort uVar2;\r\n  char local_94 [128];\r\n  undefined1 local_14 [4];\r\n  char *local_10;\r\n  undefined4 local_c;\r\n  uint local_8;\r\n  \r\n  local_c = 0;\r\n  local_8 = 0;\r\n  if (*(short *)(param_1 + 0x7c) != 0) {\r\n    sVar1 = FUN_0042050c(3,&local_c);\r\n    if ((sVar1 == 1) && ((short)local_c == 1)) {\r\n      FUN_0040aa9f();\r\n      uVar2 = FUN_00452894();\r\n      if ((uVar2 != *(ushort *)(param_1 + 0xb8)) || (param_3 != 0)) {\r\n        *(ushort *)(param_1 + 0xb8) = uVar2;\r\n        local_8 = 1;\r\n        FUN_0043da76(0x17a1,local_14);\r\n        if (local_10 == (char *)0x0) {\r\n          local_10 = &DAT_008f1a9c;\r\n        }\r\n        sprintf(local_94,local_10,(uint)uVar2);\r\n        FUN_0040ade8(local_94);\r\n      }\r\n      FUN_0040aa79();\r\n      goto LAB_004529fc;\r\n    }\r\n  }\r\n  if ((*(short *)(param_1 + 0xb8) != 0) || (param_3 != 0)) {\r\n    local_8 = 1;\r\n    if (*(undefined1 **)(param_2 + 4) != (undefined1 *)0x0) {\r\n      **(undefined1 **)(param_2 + 4) = 0;\r\n      *(undefined2 *)(param_2 + 2) = 0;\r\n    }\r\n    *(undefined2 *)(param_1 + 0xb8) = 0;\r\n  }\r\nLAB_004529fc:\r\n  return local_8 & 0xffff;\r\n}\r\n\r\n",
+    "signature": "uint __thiscall FUN_00452923(int param_1,int param_2,short param_3);"
+  },
+  "summary": "Pseudo-C for FUN_00452923 from the Deep engine (45 lines).",
+  "confidence": "derived",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "ghidra",
+    "engine_version": "12.1.4",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "deep_engine",
+      "message": "the pseudo-C comes from the external Deep engine (Ghidra), not the original source"
+    }
+  ],
+  "coverage": {
+    "status": "unknown"
+  },
+  "locations": [
+    {
+      "kind": "address",
+      "value": "0x452983"
+    }
+  ],
+  "links": [],
+  "carries_target_content": true
+}

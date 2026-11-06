@@ -1,0 +1,45 @@
+{
+  "id": "ev_c90c44e3cd6ccaa6390f0cb852b10202452ff42edbc2b36ac5c76473df50cbd3",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_function_pseudocode",
+  "params": {
+    "function": "0x58ac4f"
+  },
+  "result": {
+    "engine": "ghidra",
+    "entry": "0x58ac4f",
+    "function": "FUN_0058ac4f",
+    "pseudo_code": "\r\nvoid FUN_0058ac4f(int param_1)\r\n\r\n{\r\n  char cVar1;\r\n  UINT UVar2;\r\n  byte bVar3;\r\n  uint uVar4;\r\n  uint uVar5;\r\n  char *pcVar6;\r\n  char *pcVar7;\r\n  \r\n  UVar2 = GetACP();\r\n  if (UVar2 == 0x36a) {\r\n    pcVar6 = \"AngsanaUPC\";\r\n    goto LAB_0058acb3;\r\n  }\r\n  if ((*(char *)(param_1 + 0x17) == '\\x01') || (*(char *)(param_1 + 0x17) == '\\0')) {\r\n    if ((*(byte *)(param_1 + 0x1b) & 1) != 0) {\r\n      pcVar6 = \"Courier New\";\r\n      goto LAB_0058acb3;\r\n    }\r\n    bVar3 = *(byte *)(param_1 + 0x1b) & 0xf0;\r\n    if ((bVar3 != 0x40) && (bVar3 != 0x50)) {\r\n      pcVar6 = \"Arial\";\r\n      if (bVar3 != 0x20) {\r\n        pcVar6 = \"Times New Roman\";\r\n      }\r\n      goto LAB_0058acb3;\r\n    }\r\n  }\r\n  pcVar6 = \"\";\r\nLAB_0058acb3:\r\n  uVar4 = 0xffffffff;\r\n  do {\r\n    pcVar7 = pcVar6;\r\n    if (uVar4 == 0) break;\r\n    uVar4 = uVar4 - 1;\r\n    pcVar7 = pcVar6 + 1;\r\n    cVar1 = *pcVar6;\r\n    pcVar6 = pcVar7;\r\n  } while (cVar1 != '\\0');\r\n  uVar4 = ~uVar4;\r\n  pcVar6 = pcVar7 + -uVar4;\r\n  pcVar7 = (char *)(param_1 + 0x1c);\r\n  for (uVar5 = uVar4 >> 2; uVar5 != 0; uVar5 = uVar5 - 1) {\r\n    *(undefined4 *)pcVar7 = *(undefined4 *)pcVar6;\r\n    pcVar6 = pcVar6 + 4;\r\n    pcVar7 = pcVar7 + 4;\r\n  }\r\n  for (uVar4 = uVar4 & 3; uVar4 != 0; uVar4 = uVar4 - 1) {\r\n    *pcVar7 = *pcVar6;\r\n    pcVar6 = pcVar6 + 1;\r\n    pcVar7 = pcVar7 + 1;\r\n  }\r\n  return;\r\n}\r\n\r\n",
+    "signature": "void FUN_0058ac4f(int param_1);"
+  },
+  "summary": "Pseudo-C for FUN_0058ac4f from the Deep engine (58 lines).",
+  "confidence": "derived",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "ghidra",
+    "engine_version": "12.1.4",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "deep_engine",
+      "message": "the pseudo-C comes from the external Deep engine (Ghidra), not the original source"
+    }
+  ],
+  "coverage": {
+    "status": "unknown"
+  },
+  "locations": [
+    {
+      "kind": "address",
+      "value": "0x58ac4f"
+    }
+  ],
+  "links": [],
+  "carries_target_content": true
+}

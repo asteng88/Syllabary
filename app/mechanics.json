@@ -1,0 +1,212 @@
+{
+  "version": 1,
+  "values": [
+    {
+      "name": "default font",
+      "group": "text",
+      "value": "Times New Roman",
+      "source": "function 0x58ac4f; captured status bar; the person confirmed"
+    },
+    {
+      "name": "default font size",
+      "group": "text",
+      "value": 12,
+      "unit": "pt",
+      "source": "captured status bar; the person confirmed"
+    },
+    {
+      "name": "default paragraph style",
+      "group": "text",
+      "value": "Default Text",
+      "source": "captured status bar"
+    },
+    {
+      "name": "new document name",
+      "group": "file",
+      "value": "Untitled1",
+      "source": "function 0x44e7a6, string 6053"
+    },
+    {
+      "name": "page indicator format",
+      "group": "status bar",
+      "value": "Pg %d",
+      "source": "function 0x452923, string 6049"
+    },
+    {
+      "name": "page number format",
+      "group": "page",
+      "value": "Page %d",
+      "source": "wpenc70.dll string 10678"
+    },
+    {
+      "name": "word count message",
+      "group": "proofing",
+      "value": "The document contains %ld characters and %ld words.",
+      "source": "wpenc70.dll string 15724"
+    },
+    {
+      "name": "page width",
+      "group": "page",
+      "value": 8.5,
+      "unit": "in",
+      "source": "measured from capture/window.png"
+    },
+    {
+      "name": "page height",
+      "group": "page",
+      "value": 11.0,
+      "unit": "in",
+      "source": "measured from capture/window.png (Letter)"
+    },
+    {
+      "name": "margin",
+      "group": "page",
+      "value": 1.0,
+      "unit": "in",
+      "source": "measured from capture/window.png"
+    },
+    {
+      "name": "zoom start",
+      "group": "view",
+      "value": 100,
+      "unit": "%",
+      "source": "menu item 203 'Standard (100%)'; the person's decision"
+    },
+    {
+      "name": "zoom minimum",
+      "group": "view",
+      "value": 25,
+      "unit": "%",
+      "source": "the person's decision"
+    },
+    {
+      "name": "zoom maximum",
+      "group": "view",
+      "value": 200,
+      "unit": "%",
+      "source": "the person's decision"
+    },
+    {
+      "name": "zoom preset small",
+      "group": "view",
+      "value": 75,
+      "unit": "%",
+      "source": "menu item 796"
+    },
+    {
+      "name": "zoom preset large",
+      "group": "view",
+      "value": 150,
+      "unit": "%",
+      "source": "menu item 797"
+    },
+    {
+      "name": "zoom preset largest",
+      "group": "view",
+      "value": 200,
+      "unit": "%",
+      "source": "menu item 204"
+    },
+    {
+      "name": "smartcorrect entries",
+      "group": "proofing",
+      "value": 170,
+      "source": "ltscorrt.reg SmartCorrect\\2.0\\en"
+    },
+    {
+      "name": "twain scanning",
+      "group": "removed",
+      "value": false,
+      "source": "menu items 2113/2115/2116, TWAIN_32.DLL at 0x8ac708 (removed on request)"
+    },
+    {
+      "name": "internet features",
+      "group": "removed",
+      "value": false,
+      "source": "menu items 1957, 1935, 1616, 1979 (removed on request)"
+    },
+    {
+      "name": "team sharing",
+      "group": "removed",
+      "value": false,
+      "source": "menu items 1637, 602, 500, 600 (removed on request)"
+    },
+    {
+      "name": "timed save interval",
+      "group": "file",
+      "value": 10,
+      "unit": "min",
+      "estimated": true
+    },
+    {
+      "name": "undo depth",
+      "group": "edit",
+      "value": 100,
+      "estimated": true
+    },
+    {
+      "name": "enlarge text step",
+      "group": "text",
+      "value": 2,
+      "unit": "pt",
+      "estimated": true
+    },
+    {
+      "name": "smallest font size",
+      "group": "text",
+      "value": 6,
+      "unit": "pt",
+      "estimated": true
+    },
+    {
+      "name": "largest font size",
+      "group": "text",
+      "value": 96,
+      "unit": "pt",
+      "estimated": true
+    },
+    {
+      "name": "spell checking",
+      "group": "proofing",
+      "value": "Windows built-in spell checker, user's language first, then English",
+      "source": "new feature (the original used its own dictionary, wp spell 4.1 string 6035)"
+    },
+    {
+      "name": "spelling suggestions shown",
+      "group": "proofing",
+      "value": 6,
+      "estimated": true
+    },
+    {
+      "name": "pdf export resolution",
+      "group": "file",
+      "value": 72,
+      "unit": "points per inch",
+      "source": "PDF standard"
+    },
+    {
+      "name": "word docx open and save",
+      "group": "file",
+      "value": true,
+      "source": "new feature"
+    },
+    {
+      "name": "bundled fonts",
+      "group": "text",
+      "value": 17,
+      "source": "app/fonts (SIL Open Font License, Google Fonts via Fontsource)"
+    },
+    {
+      "name": "recent fonts remembered",
+      "group": "text",
+      "value": 4,
+      "estimated": true
+    },
+    {
+      "name": "line spacing choices",
+      "group": "text",
+      "value": "1.0, 1.15, 1.5, 2.0, 2.5, 3.0",
+      "estimated": true
+    }
+  ]
+}

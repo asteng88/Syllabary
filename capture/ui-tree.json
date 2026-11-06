@@ -1,0 +1,511 @@
+{
+  "nodes": [
+    {
+      "class": "WordProAppWndNT",
+      "depth": 0,
+      "frame": {
+        "h": 1160,
+        "w": 1940,
+        "x": -10,
+        "y": -10
+      },
+      "role": "Window",
+      "title": "Word Pro - [Untitled1]"
+    },
+    {
+      "class": "SmrtIcnLTS90_C",
+      "depth": 1,
+      "frame": {
+        "h": 33,
+        "w": 1526,
+        "x": 396,
+        "y": 54
+      },
+      "role": "Pane"
+    },
+    {
+      "class": "MDIClient",
+      "depth": 1,
+      "frame": {
+        "h": 1033,
+        "w": 1920,
+        "x": 0,
+        "y": 86
+      },
+      "role": "Pane",
+      "title": "Workspace"
+    },
+    {
+      "class": "MDICHILDNT",
+      "depth": 2,
+      "frame": {
+        "h": 1081,
+        "w": 1940,
+        "x": -10,
+        "y": 48
+      },
+      "identifier": "17000",
+      "role": "Window",
+      "title": "Untitled1"
+    },
+    {
+      "class": "WordProDocWndNT",
+      "depth": 3,
+      "frame": {
+        "h": 1013,
+        "w": 1900,
+        "x": 0,
+        "y": 86
+      },
+      "role": "Pane"
+    },
+    {
+      "class": "WordProScrollParentWndNT",
+      "depth": 3,
+      "frame": {
+        "h": 23,
+        "w": 1903,
+        "x": -1,
+        "y": 1098
+      },
+      "role": "Pane"
+    },
+    {
+      "depth": 4,
+      "frame": {
+        "h": 26,
+        "w": 1902,
+        "x": -1,
+        "y": 1099
+      },
+      "identifier": "Horizontal ScrollBar",
+      "role": "ScrollBar",
+      "title": "Horizontal Scroll Bar"
+    },
+    {
+      "depth": 5,
+      "frame": {
+        "h": 26,
+        "w": 17,
+        "x": -1,
+        "y": 1099
+      },
+      "identifier": "SmallDecrement",
+      "role": "Button",
+      "title": "Back by small amount"
+    },
+    {
+      "depth": 5,
+      "frame": {
+        "h": 26,
+        "w": 4,
+        "x": 16,
+        "y": 1099
+      },
+      "identifier": "LargeDecrement",
+      "role": "Button",
+      "title": "Back by large amount"
+    },
+    {
+      "depth": 5,
+      "frame": {
+        "h": 26,
+        "w": 1480,
+        "x": 20,
+        "y": 1099
+      },
+      "identifier": "Thumb",
+      "role": "Thumb",
+      "title": "Thumb"
+    },
+    {
+      "depth": 5,
+      "frame": {
+        "h": 26,
+        "w": 384,
+        "x": 1500,
+        "y": 1099
+      },
+      "identifier": "LargeIncrement",
+      "role": "Button",
+      "title": "Forward by large amount"
+    },
+    {
+      "depth": 5,
+      "frame": {
+        "h": 26,
+        "w": 17,
+        "x": 1884,
+        "y": 1099
+      },
+      "identifier": "SmallIncrement",
+      "role": "Button",
+      "title": "Forward by small amount"
+    },
+    {
+      "class": "WordProVScrollBarNT",
+      "depth": 3,
+      "frame": {
+        "h": 1014,
+        "w": 20,
+        "x": 1900,
+        "y": 86
+      },
+      "role": "Pane"
+    },
+    {
+      "class": "WordProScrollParentWndNT",
+      "depth": 4,
+      "frame": {
+        "h": 994,
+        "w": 21,
+        "x": 1900,
+        "y": 106
+      },
+      "role": "Pane"
+    },
+    {
+      "depth": 5,
+      "frame": {
+        "h": 994,
+        "w": 26,
+        "x": 1900,
+        "y": 106
+      },
+      "identifier": "Vertical ScrollBar",
+      "role": "ScrollBar",
+      "title": "Vertical Scroll Bar"
+    },
+    {
+      "depth": 6,
+      "frame": {
+        "h": 17,
+        "w": 26,
+        "x": 1900,
+        "y": 106
+      },
+      "identifier": "SmallDecrement",
+      "role": "Button",
+      "title": "Back by small amount"
+    },
+    {
+      "depth": 6,
+      "frame": {
+        "h": 4,
+        "w": 26,
+        "x": 1900,
+        "y": 123
+      },
+      "identifier": "LargeDecrement",
+      "role": "Button",
+      "title": "Back by large amount"
+    },
+    {
+      "depth": 6,
+      "frame": {
+        "h": 565,
+        "w": 26,
+        "x": 1900,
+        "y": 127
+      },
+      "identifier": "Thumb",
+      "role": "Thumb",
+      "title": "Thumb"
+    },
+    {
+      "depth": 6,
+      "frame": {
+        "h": 391,
+        "w": 26,
+        "x": 1900,
+        "y": 692
+      },
+      "identifier": "LargeIncrement",
+      "role": "Button",
+      "title": "Forward by large amount"
+    },
+    {
+      "depth": 6,
+      "frame": {
+        "h": 17,
+        "w": 26,
+        "x": 1900,
+        "y": 1083
+      },
+      "identifier": "SmallIncrement",
+      "role": "Button",
+      "title": "Forward by small amount"
+    },
+    {
+      "class": "WordProBlivetNT",
+      "depth": 4,
+      "frame": {
+        "h": 20,
+        "w": 20,
+        "x": 1900,
+        "y": 86
+      },
+      "role": "Pane"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 29,
+        "w": 1920,
+        "x": 0,
+        "y": 58
+      },
+      "identifier": "TitleBar",
+      "role": "TitleBar",
+      "title": "Untitled1"
+    },
+    {
+      "class": "SmrtIcnLTS90_C",
+      "depth": 1,
+      "frame": {
+        "h": 33,
+        "w": 1923,
+        "x": 0,
+        "y": 54
+      },
+      "role": "Pane"
+    },
+    {
+      "class": "StatusWindow70",
+      "depth": 1,
+      "frame": {
+        "h": 23,
+        "w": 1923,
+        "x": -1,
+        "y": 1119
+      },
+      "role": "Pane"
+    },
+    {
+      "depth": 1,
+      "frame": {
+        "h": 29,
+        "w": 1921,
+        "x": 0,
+        "y": 0
+      },
+      "identifier": "TitleBar",
+      "role": "TitleBar",
+      "title": "Word Pro - [Untitled1]"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 28,
+        "x": 0,
+        "y": 0
+      },
+      "identifier": "SystemMenuBar",
+      "role": "MenuBar",
+      "title": "System Menu Bar"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 28,
+        "w": 28,
+        "x": 0,
+        "y": 0
+      },
+      "identifier": "Item 1",
+      "role": "MenuItem",
+      "title": "System"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 60,
+        "x": 1740,
+        "y": 0
+      },
+      "identifier": "Minimize",
+      "role": "Button",
+      "title": "Minimize"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 59,
+        "x": 1800,
+        "y": 0
+      },
+      "identifier": "Restore",
+      "role": "Button",
+      "title": "Restore"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 61,
+        "x": 1859,
+        "y": 0
+      },
+      "identifier": "Close",
+      "role": "Button",
+      "title": "Close"
+    },
+    {
+      "depth": 1,
+      "frame": {
+        "h": 24,
+        "w": 1920,
+        "x": 0,
+        "y": 29
+      },
+      "identifier": "MenuBar",
+      "role": "MenuBar",
+      "title": "Application"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 26,
+        "x": 0,
+        "y": 29
+      },
+      "identifier": "Item 1",
+      "role": "MenuItem"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 40,
+        "x": 26,
+        "y": 29
+      },
+      "identifier": "Item 2",
+      "role": "MenuItem",
+      "title": "File"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 43,
+        "x": 66,
+        "y": 29
+      },
+      "identifier": "Item 3",
+      "role": "MenuItem",
+      "title": "Edit"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 49,
+        "x": 109,
+        "y": 29
+      },
+      "identifier": "Item 4",
+      "role": "MenuItem",
+      "title": "View"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 60,
+        "x": 158,
+        "y": 29
+      },
+      "identifier": "Item 5",
+      "role": "MenuItem",
+      "title": "Create"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 50,
+        "x": 218,
+        "y": 29
+      },
+      "identifier": "Item 6",
+      "role": "MenuItem",
+      "title": "Page"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 45,
+        "x": 268,
+        "y": 29
+      },
+      "identifier": "Item 7",
+      "role": "MenuItem",
+      "title": "Text"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 73,
+        "x": 313,
+        "y": 29
+      },
+      "identifier": "Item 8",
+      "role": "MenuItem",
+      "title": "Window"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 49,
+        "x": 385,
+        "y": 29
+      },
+      "identifier": "Item 9",
+      "role": "MenuItem",
+      "title": "Help"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 24,
+        "x": 1849,
+        "y": 29
+      },
+      "identifier": "Item 61472",
+      "role": "MenuItem"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 24,
+        "x": 1873,
+        "y": 29
+      },
+      "identifier": "Item 61728",
+      "role": "MenuItem"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 24,
+        "w": 24,
+        "x": 1896,
+        "y": 29
+      },
+      "identifier": "Item 61536",
+      "role": "MenuItem"
+    }
+  ],
+  "truncated": false,
+  "windows": 1
+}

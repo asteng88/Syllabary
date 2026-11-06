@@ -1,0 +1,18 @@
+{
+  "id": "unk_44f0eda0475d11cd",
+  "revision": 2,
+  "question": "Which font sizes does the original's size list show, and how big a step do Enlarge/Reduce Text (F4/Shift+F4) take?",
+  "severity": "low",
+  "domain": "text",
+  "status": "open",
+  "probes": [
+    "capture the status bar point-size popup open",
+    "find the size table in lwplsnen.dll or another DLL"
+  ],
+  "evidence_for": [],
+  "evidence_against": [
+    "ev_920058242b5a832f8ef7fe15f3ffe17cbac8f04308c462e99a2d6f68908eafd4",
+    "ev_58a775ddda87a1f7ad2d4768ac2582b7261bff720445a561f60e1f7c2ae42dab"
+  ],
+  "resolution": "Not settled: no size table was found in wordpro.exe, wpenc70.dll or lwplsnen.dll (byte and text searches), so the list is probably built at run time from the installed font. Used instead (estimated): sizes 8–72 in common steps, Enlarge/Reduce = 2 pt, range 6–96 pt. Opening the status-bar size popup in the running original would settle it."
+}

@@ -1,0 +1,45 @@
+{
+  "id": "ev_d29fc4c3e19063f8f8fd9ec44e55adb6b05ab8359463f0f363a4e31fc4b596e8",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_function_pseudocode",
+  "params": {
+    "function": "0x44e7c8"
+  },
+  "result": {
+    "engine": "ghidra",
+    "entry": "0x44e7a6",
+    "function": "FUN_0044e7a6",
+    "pseudo_code": "\r\nvoid FUN_0044e7a6(int param_1,undefined4 param_2)\r\n\r\n{\r\n  short sVar1;\r\n  undefined1 local_10 [8];\r\n  undefined4 local_8;\r\n  \r\n  sVar1 = FUN_0044e769();\r\n  if (sVar1 == 0) {\r\n    FUN_0043da76(0x17a5,param_2);\r\n    FUN_004450ed(0x97,&local_8,1);\r\n    FUN_0044e811(local_8,local_10,10);\r\n    FUN_0040adc2(local_10);\r\n  }\r\n  else {\r\n    FUN_0040ade8(\"NonUserDoc\");\r\n  }\r\n  if (param_1 != 0) {\r\n    FUN_00404d7c();\r\n  }\r\n  return;\r\n}\r\n\r\n",
+    "signature": "void FUN_0044e7a6(int param_1,undefined4 param_2);"
+  },
+  "summary": "Pseudo-C for FUN_0044e7a6 from the Deep engine (24 lines).",
+  "confidence": "derived",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "ghidra",
+    "engine_version": "12.1.4",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "deep_engine",
+      "message": "the pseudo-C comes from the external Deep engine (Ghidra), not the original source"
+    }
+  ],
+  "coverage": {
+    "status": "unknown"
+  },
+  "locations": [
+    {
+      "kind": "address",
+      "value": "0x44e7a6"
+    }
+  ],
+  "links": [],
+  "carries_target_content": true
+}

@@ -1,0 +1,968 @@
+{
+  "nodes": [
+    {
+      "class": "Window Class",
+      "depth": 0,
+      "frame": {
+        "h": 1158,
+        "w": 1938,
+        "x": -9,
+        "y": -9
+      },
+      "role": "Window",
+      "title": "Scribe Pro - [Untitled1]"
+    },
+    {
+      "depth": 1,
+      "frame": {
+        "h": 29,
+        "w": 1920,
+        "x": 0,
+        "y": 0
+      },
+      "identifier": "TitleBar",
+      "role": "TitleBar",
+      "title": "Scribe Pro - [Untitled1]"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 28,
+        "x": 0,
+        "y": 0
+      },
+      "identifier": "SystemMenuBar",
+      "role": "MenuBar",
+      "title": "System Menu Bar"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 28,
+        "w": 28,
+        "x": 0,
+        "y": 0
+      },
+      "identifier": "Item 1",
+      "role": "MenuItem",
+      "title": "System"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 60,
+        "x": 1740,
+        "y": 0
+      },
+      "identifier": "Minimize",
+      "role": "Button",
+      "title": "Minimize"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 59,
+        "x": 1800,
+        "y": 0
+      },
+      "identifier": "Restore",
+      "role": "Button",
+      "title": "Restore"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 28,
+        "w": 61,
+        "x": 1859,
+        "y": 0
+      },
+      "identifier": "Close",
+      "role": "Button",
+      "title": "Close"
+    },
+    {
+      "depth": 1,
+      "role": "Pane"
+    },
+    {
+      "depth": 2,
+      "role": "Menu"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 29,
+        "x": 7,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "File"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 32,
+        "x": 44,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "Edit"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 39,
+        "x": 84,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "View"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 51,
+        "x": 130,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "Create"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 39,
+        "x": 189,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "Page"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 33,
+        "x": 237,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "Text"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 64,
+        "x": 278,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "Window"
+    },
+    {
+      "depth": 3,
+      "frame": {
+        "h": 30,
+        "w": 38,
+        "x": 349,
+        "y": 31
+      },
+      "role": "Button",
+      "title": "Help"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 30,
+        "w": 1905,
+        "x": 7,
+        "y": 31
+      },
+      "role": "MenuBar",
+      "title": "Application"
+    },
+    {
+      "depth": 1,
+      "role": "Pane"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 11,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "New document (Ctrl+N)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 48,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Open (Ctrl+O)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 86,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Save (Ctrl+S)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 123,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Print (Ctrl+P)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 161,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Export as PDF"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 371,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Paste (Ctrl+V)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 408,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Format painter: copy formatting to the next selection"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 31,
+        "w": 140,
+        "x": 457,
+        "y": 73
+      },
+      "role": "ComboBox",
+      "value": "Default Text"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 220,
+        "x": 600,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Font"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 31,
+        "w": 60,
+        "x": 822,
+        "y": 73
+      },
+      "role": "ComboBox",
+      "value": "12"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 896,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Bold (Ctrl+B)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 933,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Italic (Ctrl+I)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 971,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Underline (Ctrl+U)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1008,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Strikethrough"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1046,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Text colour"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1083,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Highlight"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1121,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Normal — clear formatting (Ctrl+Space)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1170,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Align left (Ctrl+L)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1207,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Center (Ctrl+E)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1245,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Align right (Ctrl+R)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1282,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Full justify (Ctrl+J)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1331,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Bullets"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1368,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Numbers"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1443,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Indent (Tab)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1481,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Line spacing"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1530,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Insert page break (Ctrl+Enter)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1567,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Insert symbol"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1616,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Find & replace (Ctrl+F)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1653,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Check spelling (F7)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1691,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Word count"
+    },
+    {
+      "depth": 3,
+      "role": "ToolTip"
+    },
+    {
+      "depth": 4,
+      "frame": {
+        "h": 21,
+        "w": 84,
+        "x": 1699,
+        "y": 120
+      },
+      "role": "Text",
+      "title": "Word count"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1728,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Navigation pane (headings)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1766,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Page setup"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1803,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Show paragraph marks"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1852,
+        "y": 71
+      },
+      "role": "Custom",
+      "title": "Switch light / dark theme"
+    },
+    {
+      "depth": 1,
+      "role": "Pane"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 66,
+        "x": 25,
+        "y": 129
+      },
+      "role": "Text",
+      "title": "Untitled1"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 22,
+        "w": 22,
+        "x": 96,
+        "y": 129
+      },
+      "role": "Custom",
+      "title": "Close"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 42,
+        "w": 116,
+        "x": 10,
+        "y": 119
+      },
+      "role": "Pane",
+      "title": "Untitled1"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 30,
+        "w": 30,
+        "x": 131,
+        "y": 125
+      },
+      "role": "Custom",
+      "title": "New document"
+    },
+    {
+      "depth": 1,
+      "role": "Pane"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 61,
+        "x": 13,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "Pg 1 of 1"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 54,
+        "x": 97,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "0 words"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 82,
+        "x": 159,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "0 characters"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 149,
+        "x": 264,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "Times New Roman 12"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 81,
+        "x": 436,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "Default Text"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 95,
+        "x": 540,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "Not saved yet"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 21,
+        "w": 38,
+        "x": 1868,
+        "y": 1103
+      },
+      "role": "Text",
+      "title": "100%"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1828,
+        "y": 1098
+      },
+      "role": "Custom",
+      "title": "Zoom in (Ctrl+=)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 30,
+        "w": 125,
+        "x": 1698,
+        "y": 1105
+      },
+      "role": "Slider"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1658,
+        "y": 1099
+      },
+      "role": "Custom",
+      "title": "Zoom out (Ctrl+-)"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1605,
+        "y": 1099
+      },
+      "role": "Custom",
+      "title": "Page width"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 35,
+        "w": 35,
+        "x": 1565,
+        "y": 1099
+      },
+      "role": "Custom",
+      "title": "Full page"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 31,
+        "w": 54,
+        "x": 1493,
+        "y": 1101
+      },
+      "role": "Button",
+      "title": "Draft"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 31,
+        "w": 66,
+        "x": 1422,
+        "y": 1101
+      },
+      "role": "Button",
+      "title": "Layout"
+    },
+    {
+      "depth": 1,
+      "role": "Pane"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 896,
+        "w": 1920,
+        "x": 0,
+        "y": 196
+      },
+      "role": "Pane",
+      "title": "Workspace"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 1390,
+        "w": 1900,
+        "x": 0,
+        "y": 197
+      },
+      "role": "Custom"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 876,
+        "w": 20,
+        "x": 1900,
+        "y": 196
+      },
+      "role": "ScrollBar",
+      "title": "Vertical Scroll Bar"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 20,
+        "w": 20,
+        "x": 1900,
+        "y": 196
+      },
+      "role": "Button",
+      "title": "Back by small amount"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 0,
+        "w": 0,
+        "x": 1900,
+        "y": 216
+      },
+      "role": "Button",
+      "title": "Back by large amount"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 526,
+        "w": 20,
+        "x": 1900,
+        "y": 216
+      },
+      "role": "Button",
+      "title": "Thumb"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 309,
+        "w": 20,
+        "x": 1900,
+        "y": 743
+      },
+      "role": "Button",
+      "title": "Forward by large amount"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 20,
+        "w": 20,
+        "x": 1900,
+        "y": 1052
+      },
+      "role": "Button",
+      "title": "Forward by small amount"
+    },
+    {
+      "depth": 2,
+      "frame": {
+        "h": 20,
+        "w": 1900,
+        "x": 0,
+        "y": 1072
+      },
+      "role": "ScrollBar",
+      "title": "Horizontal Scroll Bar"
+    },
+    {
+      "depth": 2,
+      "enabled": false,
+      "frame": {
+        "h": 20,
+        "w": 20,
+        "x": 0,
+        "y": 1072
+      },
+      "role": "Button",
+      "title": "Back by small amount"
+    },
+    {
+      "depth": 2,
+      "enabled": false,
+      "frame": {
+        "h": 0,
+        "w": 0,
+        "x": 20,
+        "y": 1072
+      },
+      "role": "Button",
+      "title": "Back by large amount"
+    },
+    {
+      "depth": 2,
+      "enabled": false,
+      "frame": {
+        "h": 20,
+        "w": 1860,
+        "x": 20,
+        "y": 1072
+      },
+      "role": "Button",
+      "title": "Thumb"
+    },
+    {
+      "depth": 2,
+      "enabled": false,
+      "frame": {
+        "h": 0,
+        "w": 0,
+        "x": 1880,
+        "y": 1072
+      },
+      "role": "Button",
+      "title": "Forward by large amount"
+    },
+    {
+      "depth": 2,
+      "enabled": false,
+      "frame": {
+        "h": 20,
+        "w": 20,
+        "x": 1880,
+        "y": 1072
+      },
+      "role": "Button",
+      "title": "Forward by small amount"
+    },
+    {
+      "class": "Winit Thread Event Target",
+      "depth": 0,
+      "frame": {
+        "h": 18,
+        "w": 18,
+        "x": 0,
+        "y": 0
+      },
+      "role": "Pane"
+    }
+  ],
+  "truncated": false,
+  "windows": 2
+}

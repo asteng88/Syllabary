@@ -1,0 +1,77 @@
+{
+  "id": "ev_452ca20e95701b475300a2dacfd5b9589d30de7c39d604ca59a18503a5f440a2",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_strings_find",
+  "params": {
+    "case_sensitive": false,
+    "limit": 60,
+    "mode": "regex",
+    "offset": 0,
+    "pattern": "Untitled|Times New Roman|zoom|Pg %|lwp$|\\.lwp"
+  },
+  "result": {
+    "matches": [
+      {
+        "address": "0x876698",
+        "references": [
+          {
+            "from": "0x58acae",
+            "function": "sub_58ac4f"
+          }
+        ],
+        "section": ".rdata",
+        "text": "Times New Roman"
+      },
+      {
+        "address": "0x878b3c",
+        "references": [],
+        "section": ".rdata",
+        "text": "Times New Roman   "
+      },
+      {
+        "address": "0x8b6fa8",
+        "references": [
+          {
+            "from": "0x4adec8",
+            "function": "sub_4adc74"
+          }
+        ],
+        "section": ".rdata",
+        "text": ".lwp"
+      },
+      {
+        "address": "0x8e8f00",
+        "references": [],
+        "section": ".rdata",
+        "text": "IsZoomed"
+      }
+    ],
+    "total": 4
+  },
+  "summary": "4 strings match \"Untitled|Times New Roman|zoom|Pg %|lwp$|\\.lwp\".",
+  "confidence": "observed",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "builtin",
+    "engine_version": "0.3.0",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "data_sections_only",
+      "message": "only strings stored in the file are searched (absence is not proof)"
+    }
+  ],
+  "coverage": {
+    "status": "complete",
+    "examined": 4,
+    "total": 4
+  },
+  "locations": [],
+  "links": []
+}

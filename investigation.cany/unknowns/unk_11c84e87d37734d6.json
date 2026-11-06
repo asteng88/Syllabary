@@ -1,0 +1,15 @@
+{
+  "id": "unk_11c84e87d37734d6",
+  "revision": 2,
+  "question": "What are the lowest and highest custom zoom levels the original allows?",
+  "severity": "low",
+  "domain": "view",
+  "status": "resolved",
+  "probes": [
+    "open View > Zoom To > Other and type an out-of-range number",
+    "follow CustomLevel (0x87e260) to the code that clamps it"
+  ],
+  "evidence_for": [],
+  "evidence_against": [],
+  "resolution": "The person decided: always start at 100%, lowest 25%, highest 200%."
+}

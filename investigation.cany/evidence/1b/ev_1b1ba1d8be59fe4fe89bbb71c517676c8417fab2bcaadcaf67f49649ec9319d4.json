@@ -1,0 +1,241 @@
+{
+  "id": "ev_1b1ba1d8be59fe4fe89bbb71c517676c8417fab2bcaadcaf67f49649ec9319d4",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_strings_find",
+  "params": {
+    "case_sensitive": false,
+    "limit": 50,
+    "mode": "regex",
+    "offset": 0,
+    "pattern": "^(8|10|12|14|18|24|36|72)$|%d%%|Custom|Facing"
+  },
+  "result": {
+    "matches": [
+      {
+        "address": "0x87d744",
+        "references": [
+          {
+            "from": "0x8b2cd0",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor16"
+      },
+      {
+        "address": "0x87d754",
+        "references": [
+          {
+            "from": "0x8b2ccc",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor15"
+      },
+      {
+        "address": "0x87d764",
+        "references": [
+          {
+            "from": "0x8b2cc8",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor14"
+      },
+      {
+        "address": "0x87d774",
+        "references": [
+          {
+            "from": "0x8b2cc4",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor13"
+      },
+      {
+        "address": "0x87d784",
+        "references": [
+          {
+            "from": "0x8b2cc0",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor12"
+      },
+      {
+        "address": "0x87d794",
+        "references": [
+          {
+            "from": "0x8b2cbc",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor11"
+      },
+      {
+        "address": "0x87d7a4",
+        "references": [
+          {
+            "from": "0x8b2cb8",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor10"
+      },
+      {
+        "address": "0x87d7b4",
+        "references": [
+          {
+            "from": "0x8b2cb4",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor9"
+      },
+      {
+        "address": "0x87d7c4",
+        "references": [
+          {
+            "from": "0x8b2cb0",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor8"
+      },
+      {
+        "address": "0x87d7d4",
+        "references": [
+          {
+            "from": "0x8b2cac",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor7"
+      },
+      {
+        "address": "0x87d7e4",
+        "references": [
+          {
+            "from": "0x8b2ca8",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor6"
+      },
+      {
+        "address": "0x87d7f4",
+        "references": [
+          {
+            "from": "0x8b2ca4",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor5"
+      },
+      {
+        "address": "0x87d804",
+        "references": [
+          {
+            "from": "0x8b2ca0",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor4"
+      },
+      {
+        "address": "0x87d814",
+        "references": [
+          {
+            "from": "0x8b2c9c",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor3"
+      },
+      {
+        "address": "0x87d824",
+        "references": [
+          {
+            "from": "0x8b2c98",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor2"
+      },
+      {
+        "address": "0x87d834",
+        "references": [
+          {
+            "from": "0x8b2c94",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomColor1"
+      },
+      {
+        "address": "0x87e260",
+        "references": [
+          {
+            "from": "0x8b2998",
+            "function": null
+          }
+        ],
+        "section": ".rdata",
+        "text": "CustomLevel"
+      },
+      {
+        "address": "0x8a56b8",
+        "references": [
+          {
+            "from": "0x600464",
+            "function": "sub_600047"
+          }
+        ],
+        "section": ".rdata",
+        "text": "Custom"
+      }
+    ],
+    "total": 18
+  },
+  "summary": "18 strings match \"^(8|10|12|14|18|24|36|72)$|%d%%|Custom|Facing\".",
+  "confidence": "observed",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "builtin",
+    "engine_version": "0.3.0",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "data_sections_only",
+      "message": "only strings stored in the file are searched (absence is not proof)"
+    }
+  ],
+  "coverage": {
+    "status": "complete",
+    "examined": 18,
+    "total": 18
+  },
+  "locations": [],
+  "links": []
+}

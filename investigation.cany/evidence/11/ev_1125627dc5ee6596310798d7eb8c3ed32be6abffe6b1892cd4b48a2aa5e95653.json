@@ -1,0 +1,165 @@
+{
+  "id": "ev_1125627dc5ee6596310798d7eb8c3ed32be6abffe6b1892cd4b48a2aa5e95653",
+  "subject": {
+    "kind": "pe",
+    "sha256": "6169d058c6fcc4306efb54d60e272f24efb89503f41952aeae64f3a6c2129fb5",
+    "name": "wordpro.exe"
+  },
+  "operation": "native_bytes_find",
+  "params": {
+    "encoding": "both",
+    "limit": 10,
+    "offset": 0,
+    "path": null,
+    "pattern": "68 A5 17 00 00",
+    "text": null
+  },
+  "result": {
+    "file_size": 5194000,
+    "limit": 10,
+    "match_cap_reached": false,
+    "matches": [
+      {
+        "address": "0x44e7c8",
+        "bytes": "68a5170000",
+        "file_offset": 321480,
+        "file_offset_hex": "0x4e7c8",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x46d0f4",
+        "bytes": "68a5170000",
+        "file_offset": 446708,
+        "file_offset_hex": "0x6d0f4",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x46d1ba",
+        "bytes": "68a5170000",
+        "file_offset": 446906,
+        "file_offset_hex": "0x6d1ba",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x503d40",
+        "bytes": "68a5170000",
+        "file_offset": 1064256,
+        "file_offset_hex": "0x103d40",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x604406",
+        "bytes": "68a5170000",
+        "file_offset": 2114566,
+        "file_offset_hex": "0x204406",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x705eab",
+        "bytes": "68a5170000",
+        "file_offset": 3169963,
+        "file_offset_hex": "0x305eab",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x764b53",
+        "bytes": "68a5170000",
+        "file_offset": 3558227,
+        "file_offset_hex": "0x364b53",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      },
+      {
+        "address": "0x810b12",
+        "bytes": "68a5170000",
+        "file_offset": 4262674,
+        "file_offset_hex": "0x410b12",
+        "length": 5,
+        "matched": "pattern",
+        "section": ".text"
+      }
+    ],
+    "native_container": "pe",
+    "offset": 0,
+    "path": "C:\\lotus\\wordpro\\wordpro.exe",
+    "searched_for": [
+      {
+        "kind": "pattern",
+        "length": 5
+      }
+    ],
+    "total_matches": 8
+  },
+  "summary": "8 match(es) for pattern in wordpro.exe; showing 8 from #0.",
+  "confidence": "observed",
+  "authority": "original-files",
+  "environment": {
+    "clean_room": false,
+    "engine": "builtin",
+    "engine_version": "0.3.0",
+    "host": "windows-x86_64"
+  },
+  "limitations": [
+    {
+      "code": "file_bytes_only",
+      "message": "The file's bytes are searched as stored: compressed, encrypted or packed regions and data built at run time are not seen, so no match is not proof of absence."
+    },
+    {
+      "code": "unmapped_regions",
+      "message": "Matches in headers, overlays or debug data that are not loaded into memory have no virtual address."
+    }
+  ],
+  "coverage": {
+    "status": "complete",
+    "examined": 8,
+    "total": 8
+  },
+  "locations": [
+    {
+      "kind": "file_offset",
+      "value": "0x4e7c8"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x6d0f4"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x6d1ba"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x103d40"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x204406"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x305eab"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x364b53"
+    },
+    {
+      "kind": "file_offset",
+      "value": "0x410b12"
+    }
+  ],
+  "links": []
+}

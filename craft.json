@@ -1,0 +1,315 @@
+{
+  "version": 2,
+  "name": "wordpro",
+  "request": "This is a very old word processor that was considered a leader at the time. Remove twain, internet and sharing. Have it as a stand alone application not connecting to the internet. Update many of its older functions and make the icons look modern. I want this to be a sleek modern version of word pro.",
+  "target": {
+    "kind": "local",
+    "path": "C:\\lotus\\wordpro\\wordpro.exe"
+  },
+  "stack": "Rust + egui (eframe)",
+  "status": "ready",
+  "note": "Ready: all 3 checks pass, 29 of 29 claims hold. 1 question about the original is still open.",
+  "created_ms": 1793838908676,
+  "updated_ms": 1793977023251,
+  "checks": [
+    {
+      "round": 1,
+      "check": "build",
+      "passed": true,
+      "similarity": null,
+      "note": "Build succeeded.",
+      "artifacts": [],
+      "at_ms": 1793843010507
+    },
+    {
+      "round": 1,
+      "check": "app-screenshot",
+      "passed": true,
+      "similarity": null,
+      "note": "The program starts and draws (1920×1111). It looks about 55% like capture/window.png. Started normally, its window looks about 64% like the original's (capture/window.png). Its controls are 55% alike by their labels; the original also has \"Word Pro - [Untitled1]\" (window), \"Word Pro - [Untitled1]\" (titlebar).",
+      "artifacts": [
+        "checks\\round-1\\screenshot.png",
+        "checks\\round-1\\window.png"
+      ],
+      "at_ms": 1793843029795,
+      "claims": [
+        {
+          "title": "It has the original's \"Back by small amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Back by large amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Forward by large amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Forward by small amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"System\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Minimize\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Restore\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Close\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"File\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Edit\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"View\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Create\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Page\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Text\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Window\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Help\" menuitem",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "round": 1,
+      "check": "mechanics",
+      "passed": true,
+      "similarity": null,
+      "note": "app/mechanics.json has 25 values (20 with a source, 5 estimated).",
+      "artifacts": [],
+      "at_ms": 1793843029872,
+      "claims": [
+        {
+          "title": "default font size (12) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "page width (8.5) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "page height (11) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "margin (1) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom start (100) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom minimum (25) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom maximum (200) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom preset small (75) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom preset large (150) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom preset largest (200) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "smartcorrect entries (170) is used in the code",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "check": "build",
+      "passed": true,
+      "similarity": null,
+      "note": "Build succeeded.",
+      "artifacts": [],
+      "at_ms": 1793977002681
+    },
+    {
+      "round": 2,
+      "check": "app-screenshot",
+      "passed": true,
+      "similarity": null,
+      "note": "The program starts and draws (1920×1111). It looks about 55% like capture/window.png. Started normally, its window looks about 64% like the original's (capture/window.png). Its controls are 53% alike by their labels; the original also has \"Word Pro - [Untitled1]\" (window), \"Word Pro - [Untitled1]\" (titlebar).",
+      "artifacts": [
+        "checks\\round-2\\screenshot.png",
+        "checks\\round-2\\window.png"
+      ],
+      "at_ms": 1793977023135,
+      "claims": [
+        {
+          "title": "It has the original's \"Back by small amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Back by large amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Forward by large amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Forward by small amount\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"System\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Minimize\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Restore\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Close\" button",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"File\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Edit\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"View\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Create\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Page\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Text\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Window\" menuitem",
+          "passed": true
+        },
+        {
+          "title": "It has the original's \"Help\" menuitem",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "check": "mechanics",
+      "passed": true,
+      "similarity": null,
+      "note": "app/mechanics.json has 32 values (24 with a source, 8 estimated).",
+      "artifacts": [],
+      "at_ms": 1793977023249,
+      "claims": [
+        {
+          "title": "default font size (12) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "page width (8.5) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "page height (11) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "margin (1) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom start (100) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom minimum (25) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom maximum (200) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom preset small (75) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom preset large (150) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "zoom preset largest (200) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "smartcorrect entries (170) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "pdf export resolution (72) is used in the code",
+          "passed": true
+        },
+        {
+          "title": "bundled fonts (17) is used in the code",
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "agent_session": null,
+  "agent_session_by": "antigravity",
+  "allowed_actions": [],
+  "last_reply": "I'm adding spell checking that uses Windows' own built-in offline dictionary.Those landed in the wrong section; fixing the project file.Spell checking is wired in. Now writing the PDF export (used for printing too).Now Word (.docx) open and save.I'm connecting the new Word, PDF and print options to the File menu.It builds. Adding tests for PDF output and the spell checker, then running all tests.The PDF test was measuring positions on converted text rather than raw bytes; fixing the test.All 9 tests pass. Let me render a real PDF from the sample document and look at it.Fonts are in the app folder with their licences. Now wiring them into the font list and building the new picker.Now the new font picker.Builds cleanly. Taking screenshots: the normal window, and one with the font picker open (using a temporary test switch).The check passes. One last sanity look inside the sample PDF to confirm the words are really in it.I added the common modern features:\n- **Spelling:** spell check as you type, using Windows' own offline dictionary, with a right-click menu of suggestions and a Check Spelling window (F7).\n- **Formatting and navigation:** a format painter, a line-spacing button and a headings navigation pane.\n- **Files and printing:** PDF export, printing (Print makes a PDF and opens it in your PDF viewer, where you print), and opening and saving Word (.docx) files.\n\nAs you asked, 17 free fonts now ship with the app (Lora, Merriweather, Roboto, Inter and others, all under a free licence that allows redistribution). The font box is now a wider, searchable list grouped into Serif, Sans Serif, Monospace and Handwriting, with each name shown in its own font. One installed font, Cambria, is hidden because the app can't read the file format Windows stores it in.\n\nThe build and all automatic tests pass, and the comparison check passes. I couldn't view a printed PDF as a picture here, so I only confirmed the words land on the right pages inside it.",
+  "asset_budget_usd": 5.0,
+  "generate_assets": false,
+  "questions": "decide"
+}
