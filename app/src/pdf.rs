@@ -145,11 +145,14 @@ pub fn export(ctx: &egui::Context, doc: &Document, book: &FontBook) -> Vec<u8> {
         let n = (l.end - l.start).min(glyphs.len());
 
         // highlights first, so text sits on top
-        for k in 0..n {
+        let (hy0, hy1) = layout::highlight_pill_y(&l.galley, 0, n, gh);
+        for (k, g) in glyphs.iter().enumerate().take(n) {
             let s = para.styles[l.start + k];
             if let Some(h) = s.highlight {
-                let g = &glyphs[k];
-                page.rect(h, ox + g.pos.x, ph - (oy + gh), g.advance_width + 0.3, gh);
+
+                let t = if n <= 1 { 0.5 } else { k as f32 / (n - 1) as f32 };
+                let col = crate::doc::lerp_rgb(h, s.highlight_to.unwrap_or(h), t);
+                page.rect(col, ox + g.pos.x, ph - (oy + hy1), g.advance_width + 0.3, (hy1 - hy0).max(1.0));
             }
         }
 
@@ -214,7 +217,7 @@ pub fn export(ctx: &egui::Context, doc: &Document, book: &FontBook) -> Vec<u8> {
             if let Some(mrow) = m.rows.first() {
                 let s = para.style_at(0);
                 let txt: String = mrow.row.glyphs.iter().map(|g| g.chr).collect();
-                let base = oy + mrow.row.glyphs.first().map(|g| g.pos.y).unwrap_or(gh * 0.8);
+                let base = oy + mrow.row.glyphs.first().map_or(gh * 0.8, |g| g.pos.y);
                 let mx = lay.content_offset.x + l.marker_x;
                 page.text(font_res(&CharStyle { bold: false, italic: false, ..s }), s.size, s.color, mx, ph - base, &txt);
             }

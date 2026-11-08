@@ -22,15 +22,25 @@ pub struct Speller {
     pub language: String,
 }
 
+impl Default for Speller {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Speller {
     pub fn new() -> Self {
         #[cfg(windows)]
         {
+            // SAFETY: `Self::create` initializes COM on the current thread and queries the
+            // inbox Windows `ISpellCheckerFactory` COM server using valid Win32 parameters.
             let (checker, language) = unsafe { Self::create() }.unwrap_or((None, String::new()));
-            return Self { checker, cache: Default::default(), ignored: Default::default(), language };
+            Self { checker, cache: Default::default(), ignored: Default::default(), language }
         }
         #[cfg(not(windows))]
-        Self { cache: Default::default(), ignored: Default::default(), language: String::new() }
+        {
+            Self { cache: Default::default(), ignored: Default::default(), language: String::new() }
+        }
     }
 
     #[cfg(windows)]
@@ -49,7 +59,7 @@ impl Speller {
         }
         for tag in tags {
             let h = HSTRING::from(tag.as_str());
-            if factory.IsSupported(&h).map(|b| b.as_bool()).unwrap_or(false) {
+            if factory.IsSupported(&h).is_ok_and(|b| b.as_bool()) {
                 let c = factory.CreateSpellChecker(&h)?;
                 return Ok((Some(c), tag));
             }
@@ -60,10 +70,12 @@ impl Speller {
     pub fn available(&self) -> bool {
         #[cfg(windows)]
         {
-            return self.checker.is_some();
+            self.checker.is_some()
         }
-        #[allow(unreachable_code)]
-        false
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
 
     /// Misspelled ranges (char indices) in one paragraph.
@@ -93,10 +105,12 @@ impl Speller {
         v.iter().copied().filter(|(a, b)| !ig.contains(&text[*a..*b].iter().collect::<String>().to_lowercase())).collect()
     }
 
-    #[allow(unused_variables)]
+    #[cfg_attr(not(windows), expect(unused_variables, reason = "Spellchecker COM backend is only available on Windows"))]
     fn check_raw(&self, s: &str, text: &[char]) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         #[cfg(windows)]
+        // SAFETY: `self.checker` is a valid COM interface pointer on this apartment thread,
+        // and `HSTRING` keeps the UTF-16 buffer alive for the duration of `Check`.
         unsafe {
             let Some(chk) = &self.checker else { return out };
             // map UTF-16 offsets to char indices
@@ -125,10 +139,12 @@ impl Speller {
         out
     }
 
-    #[allow(unused_variables)]
+    #[cfg_attr(not(windows), expect(unused_variables, reason = "Spellchecker COM backend is only available on Windows"))]
     pub fn suggest(&self, word: &str) -> Vec<String> {
         let mut out = Vec::new();
         #[cfg(windows)]
+        // SAFETY: `list.Next` returns a COM-allocated `PWSTR` which we convert to a Rust `String`
+        // and immediately free with `CoTaskMemFree` as required by the `IEnumString` contract.
         unsafe {
             let Some(chk) = &self.checker else { return out };
             let Ok(list) = chk.Suggest(&HSTRING::from(word)) else { return out };
@@ -148,9 +164,10 @@ impl Speller {
     }
 
     /// Add to the computer's own custom dictionary (a local file kept by Windows).
-    #[allow(unused_variables)]
+    #[cfg_attr(not(windows), expect(unused_variables, reason = "Spellchecker COM backend is only available on Windows"))]
     pub fn add(&self, word: &str) {
         #[cfg(windows)]
+        // SAFETY: `chk.Add` takes a valid `HSTRING` reference on the initialized COM apartment.
         unsafe {
             if let Some(chk) = &self.checker {
                 let _ = chk.Add(&HSTRING::from(word));

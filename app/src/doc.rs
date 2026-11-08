@@ -1,4 +1,5 @@
-//! Document model: paragraphs of styled characters, page setup and editing operations.
+//! Document model: paragraphs of styled characters, page setup, links, comments,
+//! smart chips, building blocks, checklists, and export/import operations.
 
 use serde::{Deserialize, Serialize};
 
@@ -91,7 +92,7 @@ pub fn bundled_folder(i: u8) -> Option<&'static str> {
     (i as usize).checked_sub(14).and_then(|k| DIRS.get(k).copied())
 }
 
-pub const DEFAULT_FONT: u8 = 0; // Times New Roman
+pub const DEFAULT_FONT: u8 = 2; // Calibri
 pub const DEFAULT_SIZE: f32 = 12.0; // points
 pub const MIN_SIZE: f32 = 6.0;
 pub const MAX_SIZE: f32 = 96.0;
@@ -125,9 +126,34 @@ pub struct CharStyle {
     pub underline: bool,
     pub strike: bool,
     pub color: [u8; 3],
+    /// Optional right-hand end color for a Craft-style left-to-right fading text color.
+    #[serde(default)]
+    pub color_to: Option<[u8; 3]>,
     pub highlight: Option<[u8; 3]>,
+    /// Optional right-hand end color for a Craft-style left-to-right fading highlight.
+    #[serde(default)]
+    pub highlight_to: Option<[u8; 3]>,
     /// 1 = superscript, -1 = subscript
     pub script: i8,
+    /// 0 = no link; >= 1 = 1-based index into `Document::links`
+    #[serde(default)]
+    pub link: u16,
+}
+
+impl CharStyle {
+    pub fn is_gradient_color(&self) -> bool {
+        matches!(self.color_to, Some(b) if b != self.color)
+    }
+
+    pub fn is_gradient_highlight(&self) -> bool {
+        matches!((self.highlight, self.highlight_to), (Some(a), Some(b)) if a != b)
+    }
+}
+
+pub fn lerp_rgb(c1: [u8; 3], c2: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
+    [mix(c1[0], c2[0]), mix(c1[1], c2[1]), mix(c1[2], c2[2])]
 }
 
 impl Default for CharStyle {
@@ -140,8 +166,219 @@ impl Default for CharStyle {
             underline: false,
             strike: false,
             color: [0, 0, 0],
+            color_to: None,
             highlight: None,
+            highlight_to: None,
             script: 0,
+            link: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum ShortcutPreset {
+    #[default]
+    GoogleDocs,
+    MsWord,
+    WordPro,
+}
+
+impl ShortcutPreset {
+    pub const ALL: [ShortcutPreset; 3] = [
+        ShortcutPreset::MsWord,
+        ShortcutPreset::WordPro,
+        ShortcutPreset::GoogleDocs,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "MS Word",
+            ShortcutPreset::WordPro => "WordPro",
+            ShortcutPreset::GoogleDocs => "Google Docs",
+        }
+    }
+
+    pub fn save_as(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "F12",
+            ShortcutPreset::WordPro | ShortcutPreset::GoogleDocs => "Ctrl+Shift+S",
+        }
+    }
+
+    pub fn close_tab(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Ctrl+F4",
+            ShortcutPreset::MsWord | ShortcutPreset::GoogleDocs => "Ctrl+W",
+        }
+    }
+
+    pub fn paste_plain(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "Ctrl+Alt+V",
+            ShortcutPreset::WordPro | ShortcutPreset::GoogleDocs => "Ctrl+Shift+V",
+        }
+    }
+
+    pub fn replace(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Ctrl+F",
+            ShortcutPreset::MsWord | ShortcutPreset::GoogleDocs => "Ctrl+H",
+        }
+    }
+
+    pub fn strikethrough(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Alt+Shift+5",
+            ShortcutPreset::MsWord => "Ctrl+Shift+X",
+            ShortcutPreset::WordPro => "Ctrl+Shift+K",
+        }
+    }
+
+    pub fn superscript(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "Ctrl+Shift+=",
+            ShortcutPreset::WordPro | ShortcutPreset::GoogleDocs => "Ctrl+.",
+        }
+    }
+
+    pub fn subscript(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "Ctrl+=",
+            ShortcutPreset::WordPro | ShortcutPreset::GoogleDocs => "Ctrl+,",
+        }
+    }
+
+    pub fn grow_font(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "F4",
+            ShortcutPreset::MsWord | ShortcutPreset::GoogleDocs => "Ctrl+Shift+.",
+        }
+    }
+
+    pub fn shrink_font(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Shift+F4",
+            ShortcutPreset::MsWord | ShortcutPreset::GoogleDocs => "Ctrl+Shift+,",
+        }
+    }
+
+    pub fn align_left(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+L",
+            ShortcutPreset::MsWord | ShortcutPreset::WordPro => "Ctrl+L",
+        }
+    }
+
+    pub fn align_center(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+E",
+            ShortcutPreset::MsWord | ShortcutPreset::WordPro => "Ctrl+E",
+        }
+    }
+
+    pub fn align_right(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+R",
+            ShortcutPreset::MsWord | ShortcutPreset::WordPro => "Ctrl+R",
+        }
+    }
+
+    pub fn align_justify(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+J",
+            ShortcutPreset::MsWord | ShortcutPreset::WordPro => "Ctrl+J",
+        }
+    }
+
+    pub fn indent(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "Ctrl+M",
+            ShortcutPreset::WordPro | ShortcutPreset::GoogleDocs => "Ctrl+]",
+        }
+    }
+
+    pub fn outdent(self) -> &'static str {
+        match self {
+            ShortcutPreset::MsWord => "Ctrl+Shift+M",
+            ShortcutPreset::WordPro | ShortcutPreset::GoogleDocs => "Ctrl+[",
+        }
+    }
+
+    pub fn bullet_list(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+8",
+            ShortcutPreset::MsWord => "Ctrl+Shift+L",
+            ShortcutPreset::WordPro => "Ctrl+Shift+B",
+        }
+    }
+
+    pub fn number_list(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs | ShortcutPreset::MsWord => "Ctrl+Shift+7",
+            ShortcutPreset::WordPro => "Ctrl+Shift+N",
+        }
+    }
+
+    pub fn checklist(self) -> &'static str {
+        "Ctrl+Shift+9"
+    }
+
+    pub fn clear_format(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+\\",
+            ShortcutPreset::MsWord | ShortcutPreset::WordPro => "Ctrl+Space",
+        }
+    }
+
+    pub fn style_normal(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Alt+0",
+            ShortcutPreset::MsWord => "Ctrl+Shift+N",
+            ShortcutPreset::WordPro => "Alt+0",
+        }
+    }
+
+    pub fn style_h1(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Alt+1",
+            ShortcutPreset::GoogleDocs | ShortcutPreset::MsWord => "Ctrl+Alt+1",
+        }
+    }
+
+    pub fn style_h2(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Alt+2",
+            ShortcutPreset::GoogleDocs | ShortcutPreset::MsWord => "Ctrl+Alt+2",
+        }
+    }
+
+    pub fn style_h3(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Alt+3",
+            ShortcutPreset::GoogleDocs | ShortcutPreset::MsWord => "Ctrl+Alt+3",
+        }
+    }
+
+    pub fn spellcheck(self) -> &'static str {
+        match self {
+            ShortcutPreset::WordPro => "Ctrl+F2",
+            ShortcutPreset::GoogleDocs | ShortcutPreset::MsWord => "F7",
+        }
+    }
+
+    pub fn word_count(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+C",
+            ShortcutPreset::MsWord => "Ctrl+Shift+G",
+            ShortcutPreset::WordPro => "Ctrl+Shift+W",
+        }
+    }
+
+    pub fn dictionary(self) -> &'static str {
+        match self {
+            ShortcutPreset::GoogleDocs => "Ctrl+Shift+Y",
+            ShortcutPreset::MsWord => "Shift+F7",
+            ShortcutPreset::WordPro => "Alt+F2",
         }
     }
 }
@@ -159,6 +396,7 @@ pub enum ListKind {
     None,
     Bullet,
     Number,
+    Checklist,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -171,6 +409,14 @@ pub struct ParaFmt {
     pub line_spacing: f32,
     pub style: usize,
     pub page_break_before: bool,
+    #[serde(default)]
+    pub checked: bool,
+    #[serde(default)]
+    pub bullet_preset: u8,
+    #[serde(default)]
+    pub hr: bool,
+    #[serde(default)]
+    pub shading: Option<[u8; 3]>,
 }
 
 impl Default for ParaFmt {
@@ -184,6 +430,10 @@ impl Default for ParaFmt {
             line_spacing: 1.0,
             style: 0,
             page_break_before: false,
+            checked: false,
+            bullet_preset: 0,
+            hr: false,
+            shading: None,
         }
     }
 }
@@ -237,7 +487,7 @@ pub fn named_styles() -> Vec<NamedStyle> {
         NamedStyle {
             name: "Code",
             chr: CharStyle { font: 12, size: 10.0, ..base },
-            fmt: ParaFmt { space_after: 0.0, ..pf },
+            fmt: ParaFmt { space_after: 2.0, shading: Some([241, 245, 249]), ..pf },
         },
     ]
 }
@@ -319,6 +569,7 @@ impl Default for PageSetup {
 pub const PAGE_SIZES: &[(&str, f32, f32)] = &[
     ("Letter (8.5 × 11 in)", 8.5, 11.0),
     ("Legal (8.5 × 14 in)", 8.5, 14.0),
+    ("Tabloid (11 × 17 in)", 11.0, 17.0),
     ("A4 (210 × 297 mm)", 8.27, 11.69),
     ("A5 (148 × 210 mm)", 5.83, 8.27),
     ("Executive (7.25 × 10.5 in)", 7.25, 10.5),
@@ -331,6 +582,39 @@ pub struct DocInfo {
     pub subject: String,
     pub keywords: String,
     pub notes: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DocComment {
+    pub id: u64,
+    pub para: usize,
+    pub start: usize,
+    pub end: usize,
+    pub quote: String,
+    pub author: String,
+    pub text: String,
+    pub timestamp: String,
+    pub resolved: bool,
+    #[serde(default)]
+    pub replies: Vec<(String, String, String)>,
+    #[serde(default)]
+    pub is_suggestion: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DocVersion {
+    pub name: String,
+    pub timestamp: String,
+    pub words: usize,
+    pub snapshot_json: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CitationEntry {
+    pub author: String,
+    pub title: String,
+    pub year: String,
+    pub source: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
@@ -352,6 +636,13 @@ pub struct Document {
     pub header: String,
     pub footer: String,
     pub info: DocInfo,
+    pub links: Vec<String>,
+    pub comments: Vec<DocComment>,
+    pub bookmarks: Vec<(String, usize)>,
+    pub summary: String,
+    pub starred: bool,
+    pub pageless: bool,
+    pub citations: Vec<CitationEntry>,
 }
 
 impl Default for Document {
@@ -362,6 +653,13 @@ impl Default for Document {
             header: String::new(),
             footer: String::new(),
             info: DocInfo::default(),
+            links: Vec::new(),
+            comments: Vec::new(),
+            bookmarks: Vec::new(),
+            summary: String::new(),
+            starred: false,
+            pageless: false,
+            citations: Vec::new(),
         }
     }
 }
@@ -374,6 +672,33 @@ pub struct Fragment {
 
 pub fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '\'' || c == '’' || c == '_'
+}
+
+fn to_roman(mut n: usize) -> String {
+    let table = [
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut s = String::new();
+    for (v, sym) in table {
+        while n >= v {
+            s.push_str(sym);
+            n -= v;
+        }
+    }
+    if s.is_empty() { "i".into() } else { s }
+}
+
+fn to_alpha(n: usize) -> String {
+    let idx = n.saturating_sub(1) % 26;
+    ((b'a' + idx as u8) as char).to_string()
 }
 
 impl Document {
@@ -389,6 +714,52 @@ impl Document {
     pub fn style_at(&self, pos: Pos) -> CharStyle {
         let pos = self.clamp(pos);
         self.paras[pos.p].style_at(pos.c)
+    }
+
+    pub fn add_link(&mut self, url: &str) -> u16 {
+        let u = url.trim();
+        if u.is_empty() {
+            return 0;
+        }
+        if let Some(idx) = self.links.iter().position(|x| x == u) {
+            return (idx + 1) as u16;
+        }
+        self.links.push(u.to_string());
+        self.links.len() as u16
+    }
+
+    pub fn link_url(&self, id: u16) -> Option<&str> {
+        if id == 0 {
+            None
+        } else {
+            self.links.get((id - 1) as usize).map(|s| s.as_str())
+        }
+    }
+
+    /// If `pos` is inside or immediately adjacent to a link run in the same paragraph, returns `(start, end, link_id)`.
+    pub fn link_bounds(&self, pos: Pos) -> Option<(Pos, Pos, u16)> {
+        let pos = self.clamp(pos);
+        let para = &self.paras[pos.p];
+        if para.text.is_empty() {
+            return None;
+        }
+        let idx = if pos.c < para.len() && para.styles[pos.c].link > 0 {
+            pos.c
+        } else if pos.c > 0 && para.styles[pos.c - 1].link > 0 {
+            pos.c - 1
+        } else {
+            return None;
+        };
+        let lid = para.styles[idx].link;
+        let mut s = idx;
+        while s > 0 && para.styles[s - 1].link == lid {
+            s -= 1;
+        }
+        let mut e = idx + 1;
+        while e < para.len() && para.styles[e].link == lid {
+            e += 1;
+        }
+        Some((Pos::new(pos.p, s), Pos::new(pos.p, e), lid))
     }
 
     /// Insert text (may contain '\n' for new paragraphs). Returns the position after it.
@@ -412,12 +783,15 @@ impl Document {
     /// Split the paragraph at `pos` (Enter). Returns the start of the new paragraph.
     pub fn split(&mut self, pos: Pos) -> Pos {
         let pos = self.clamp(pos);
-        let style = self.paras[pos.p].style_at(pos.c);
+        let mut style = self.paras[pos.p].style_at(pos.c);
+        style.link = 0;
         let para = &mut self.paras[pos.p];
         let tail_text: Vec<char> = para.text.split_off(pos.c);
         let tail_styles: Vec<CharStyle> = para.styles.split_off(pos.c);
         let mut fmt = para.fmt;
         fmt.page_break_before = false;
+        fmt.hr = false;
+        fmt.checked = false;
         // A heading followed by Enter continues with Default Text, like most modern editors.
         let styles = named_styles();
         if tail_text.is_empty() && matches!(styles.get(fmt.style).map(|s| s.name), Some("Title" | "Subtitle" | "Heading 1" | "Heading 2" | "Heading 3")) {
@@ -440,6 +814,7 @@ impl Document {
             let para = &mut self.paras[a.p];
             if a.c == 0 && b.c == para.len() {
                 para.end_style = para.style_at(0);
+                para.end_style.link = 0;
             }
             para.text.drain(a.c..b.c);
             para.styles.drain(a.c..b.c);
@@ -644,6 +1019,46 @@ impl Document {
         }
         n
     }
+
+    /// Marker string for any list kind, supporting Google Docs bullet & numbering presets.
+    pub fn list_marker(&self, p: usize) -> String {
+        let fmt = self.paras[p].fmt;
+        let lvl = (fmt.indent as usize) % 3;
+        match fmt.list {
+            ListKind::None => String::new(),
+            ListKind::Checklist => if fmt.checked { "☑".into() } else { "☐".into() },
+            ListKind::Bullet => {
+                let sets: [[&str; 3]; 4] = [
+                    ["•", "◦", "▪"],
+                    ["❖", "➢", "▪"],
+                    ["➔", "➢", "•"],
+                    ["★", "☆", "•"],
+                ];
+                sets[(fmt.bullet_preset as usize) % sets.len()][lvl].to_string()
+            }
+            ListKind::Number => {
+                let n = self.list_number(p);
+                match fmt.bullet_preset % 4 {
+                    0 => match lvl {
+                        0 => format!("{n}."),
+                        1 => format!("{}.", to_alpha(n)),
+                        _ => format!("{}.", to_roman(n)),
+                    },
+                    1 => match lvl {
+                        0 => format!("{n})"),
+                        1 => format!("{})", to_alpha(n)),
+                        _ => format!("{})", to_roman(n)),
+                    },
+                    2 => match lvl {
+                        0 => format!("{}.", to_roman(n).to_uppercase()),
+                        1 => format!("{}.", to_alpha(n).to_uppercase()),
+                        _ => format!("{n}."),
+                    },
+                    _ => format!("{}.", to_alpha(n).to_uppercase()),
+                }
+            }
+        }
+    }
 }
 
 pub fn order(a: Pos, b: Pos) -> (Pos, Pos) {
@@ -793,6 +1208,20 @@ struct FileDoc {
     footer: String,
     #[serde(default)]
     info: DocInfo,
+    #[serde(default)]
+    links: Vec<String>,
+    #[serde(default)]
+    comments: Vec<DocComment>,
+    #[serde(default)]
+    bookmarks: Vec<(String, usize)>,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    starred: bool,
+    #[serde(default)]
+    pageless: bool,
+    #[serde(default)]
+    citations: Vec<CitationEntry>,
     paras: Vec<FilePara>,
 }
 
@@ -806,6 +1235,13 @@ pub fn to_json(doc: &Document) -> String {
         header: doc.header.clone(),
         footer: doc.footer.clone(),
         info: doc.info.clone(),
+        links: doc.links.clone(),
+        comments: doc.comments.clone(),
+        bookmarks: doc.bookmarks.clone(),
+        summary: doc.summary.clone(),
+        starred: doc.starred,
+        pageless: doc.pageless,
+        citations: doc.citations.clone(),
         paras: doc
             .paras
             .iter()
@@ -835,7 +1271,20 @@ pub fn from_json(s: &str) -> Result<Document, String> {
     if paras.is_empty() {
         paras.push(Para::new(CharStyle::default(), ParaFmt::default()));
     }
-    Ok(Document { paras, page: fd.page, header: fd.header, footer: fd.footer, info: fd.info })
+    Ok(Document {
+        paras,
+        page: fd.page,
+        header: fd.header,
+        footer: fd.footer,
+        info: fd.info,
+        links: fd.links,
+        comments: fd.comments,
+        bookmarks: fd.bookmarks,
+        summary: fd.summary,
+        starred: fd.starred,
+        pageless: fd.pageless,
+        citations: fd.citations,
+    })
 }
 
 pub fn from_plain(s: &str) -> Document {
@@ -843,6 +1292,483 @@ pub fn from_plain(s: &str) -> Document {
     let st = CharStyle::default();
     d.insert_text(Pos::new(0, 0), &s.replace("\r\n", "\n"), st);
     d
+}
+
+// ───────────────────────── Google Docs (.gdoc) export / import ─────────────────────────
+
+pub fn to_gdoc(doc: &Document) -> String {
+    let styles = named_styles();
+    let title = if doc.info.title.is_empty() { "Untitled document" } else { &doc.info.title };
+    let mut content = Vec::new();
+    for p in &doc.paras {
+        if p.fmt.hr {
+            content.push(serde_json::json!({
+                "paragraph": {
+                    "elements": [{ "horizontalRule": {} }],
+                    "paragraphStyle": { "namedStyleType": "NORMAL_TEXT" }
+                }
+            }));
+            continue;
+        }
+        let named_style = match styles.get(p.fmt.style).map(|s| s.name) {
+            Some("Title") => "TITLE",
+            Some("Subtitle") => "SUBTITLE",
+            Some("Heading 1") => "HEADING_1",
+            Some("Heading 2") => "HEADING_2",
+            Some("Heading 3") => "HEADING_3",
+            _ => "NORMAL_TEXT",
+        };
+        let alignment = match p.fmt.align {
+            Align::Left => "START",
+            Align::Center => "CENTER",
+            Align::Right => "END",
+            Align::Justify => "JUSTIFIED",
+        };
+        let mut elements = Vec::new();
+        for (a, b, s) in p.runs() {
+            let mut txt: String = p.text[a..b].iter().collect();
+            if b == p.text.len() {
+                txt.push('\n');
+            }
+            let font_name = FONT_NAMES[s.font as usize % FONT_NAMES.len()];
+            let baseline = if s.script > 0 {
+                "SUPERSCRIPT"
+            } else if s.script < 0 {
+                "SUBSCRIPT"
+            } else {
+                "NONE"
+            };
+            let mut ts = serde_json::json!({
+                "bold": s.bold,
+                "italic": s.italic,
+                "underline": s.underline,
+                "strikethrough": s.strike,
+                "baselineOffset": baseline,
+                "fontSize": { "magnitude": s.size, "unit": "PT" },
+                "weightedFontFamily": { "fontFamily": font_name },
+                "foregroundColor": {
+                    "color": {
+                        "rgbColor": {
+                            "red": s.color[0] as f32 / 255.0,
+                            "green": s.color[1] as f32 / 255.0,
+                            "blue": s.color[2] as f32 / 255.0,
+                        }
+                    }
+                }
+            });
+            if let Some(hl) = s.highlight {
+                ts["backgroundColor"] = serde_json::json!({
+                    "color": {
+                        "rgbColor": {
+                            "red": hl[0] as f32 / 255.0,
+                            "green": hl[1] as f32 / 255.0,
+                            "blue": hl[2] as f32 / 255.0,
+                        }
+                    }
+                });
+            }
+            if let Some(url) = doc.link_url(s.link) {
+                ts["link"] = serde_json::json!({ "url": url });
+            }
+            elements.push(serde_json::json!({
+                "textRun": {
+                    "content": txt,
+                    "textStyle": ts
+                }
+            }));
+        }
+        if elements.is_empty() {
+            elements.push(serde_json::json!({
+                "textRun": {
+                    "content": "\n",
+                    "textStyle": {}
+                }
+            }));
+        }
+        let mut para_obj = serde_json::json!({
+            "elements": elements,
+            "paragraphStyle": {
+                "namedStyleType": named_style,
+                "alignment": alignment,
+                "lineSpacing": p.fmt.line_spacing * 100.0,
+                "spaceAbove": { "magnitude": p.fmt.space_before, "unit": "PT" },
+                "spaceBelow": { "magnitude": p.fmt.space_after, "unit": "PT" },
+                "indentStart": { "magnitude": p.fmt.indent as f32 * 36.0, "unit": "PT" }
+            }
+        });
+        if p.fmt.list != ListKind::None {
+            let list_id = match p.fmt.list {
+                ListKind::Bullet => "kix.bullet",
+                ListKind::Number => "kix.number",
+                ListKind::Checklist => "kix.checklist",
+                ListKind::None => "",
+            };
+            para_obj["bullet"] = serde_json::json!({
+                "listId": list_id,
+                "nestingLevel": p.fmt.indent,
+                "checked": p.fmt.checked
+            });
+        }
+        content.push(serde_json::json!({ "paragraph": para_obj }));
+    }
+
+    let mut val: serde_json::Value = serde_json::from_str(&to_json(doc)).unwrap_or_else(|_| serde_json::json!({}));
+    val["format"] = serde_json::json!("google-docs-document");
+    val["title"] = serde_json::json!(title);
+    val["doc_id"] = serde_json::json!("scribe-pro-gdoc");
+    val["body"] = serde_json::json!({ "content": content });
+    serde_json::to_string_pretty(&val).unwrap_or_default()
+}
+
+pub fn from_gdoc(s: &str) -> Result<Document, String> {
+    let v: serde_json::Value = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    // 1. Native Scribe Pro / hybrid .gdoc with lossless `paras` array
+    if v.get("paras").and_then(|p| p.as_array()).is_some() {
+        return from_json(s);
+    }
+    // 2. Google Docs REST API v1 JSON structure (`body.content`)
+    if let Some(content) = v.get("body").and_then(|b| b.get("content")).and_then(|c| c.as_array()) {
+        let mut doc = Document { paras: Vec::new(), ..Default::default() };
+        if let Some(t) = v.get("title").and_then(|t| t.as_str()) {
+            doc.info.title = t.to_string();
+        }
+        let styles = named_styles();
+        for item in content {
+            let Some(p_obj) = item.get("paragraph") else { continue };
+            let mut fmt = ParaFmt::default();
+            let mut base = CharStyle::default();
+            if let Some(ps) = p_obj.get("paragraphStyle") {
+                if let Some(nst) = ps.get("namedStyleType").and_then(|x| x.as_str()) {
+                    let style_idx = match nst {
+                        "TITLE" => Some(2),
+                        "SUBTITLE" => Some(3),
+                        "HEADING_1" => Some(4),
+                        "HEADING_2" => Some(5),
+                        "HEADING_3" | "HEADING_4" | "HEADING_5" | "HEADING_6" => Some(6),
+                        _ => None,
+                    };
+                    if let Some(idx) = style_idx {
+                        fmt = ParaFmt { style: idx, ..styles[idx].fmt };
+                        base = styles[idx].chr;
+                    }
+                }
+                if let Some(al) = ps.get("alignment").and_then(|x| x.as_str()) {
+                    fmt.align = match al {
+                        "CENTER" => Align::Center,
+                        "END" | "RIGHT" => Align::Right,
+                        "JUSTIFIED" => Align::Justify,
+                        _ => Align::Left,
+                    };
+                }
+                if let Some(ls) = ps.get("lineSpacing").and_then(|x| x.as_f64()) {
+                    fmt.line_spacing = (ls as f32 / 100.0).clamp(1.0, 3.0);
+                }
+                if let Some(sa) = ps.get("spaceAbove").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
+                    fmt.space_before = (sa as f32).clamp(0.0, 72.0);
+                }
+                if let Some(sb) = ps.get("spaceBelow").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
+                    fmt.space_after = (sb as f32).clamp(0.0, 72.0);
+                }
+                if let Some(ind) = ps.get("indentStart").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
+                    fmt.indent = ((ind as f32 / 36.0).round() as i32).clamp(0, 8) as u8;
+                }
+            }
+            if let Some(bul) = p_obj.get("bullet") {
+                let lid = bul.get("listId").and_then(|x| x.as_str()).unwrap_or("");
+                fmt.list = if lid.contains("number") || lid.contains("decimal") {
+                    ListKind::Number
+                } else if lid.contains("check") {
+                    ListKind::Checklist
+                } else {
+                    ListKind::Bullet
+                };
+                if let Some(nl) = bul.get("nestingLevel").and_then(|x| x.as_u64()) {
+                    fmt.indent = (nl as u8).min(8);
+                }
+                if let Some(chk) = bul.get("checked").and_then(|x| x.as_bool()) {
+                    fmt.checked = chk;
+                }
+            }
+            let mut p = Para::new(base, fmt);
+            if let Some(elems) = p_obj.get("elements").and_then(|e| e.as_array()) {
+                for el in elems {
+                    if el.get("horizontalRule").is_some() {
+                        p.fmt.hr = true;
+                        continue;
+                    }
+                    let Some(tr) = el.get("textRun") else { continue };
+                    let raw = tr.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    let txt = raw.strip_suffix('\n').unwrap_or(raw);
+                    let mut st = base;
+                    if let Some(ts) = tr.get("textStyle") {
+                        if let Some(b) = ts.get("bold").and_then(|x| x.as_bool()) {
+                            st.bold = b;
+                        }
+                        if let Some(i) = ts.get("italic").and_then(|x| x.as_bool()) {
+                            st.italic = i;
+                        }
+                        if let Some(u) = ts.get("underline").and_then(|x| x.as_bool()) {
+                            st.underline = u;
+                        }
+                        if let Some(s) = ts.get("strikethrough").and_then(|x| x.as_bool()) {
+                            st.strike = s;
+                        }
+                        if let Some(bo) = ts.get("baselineOffset").and_then(|x| x.as_str()) {
+                            st.script = match bo {
+                                "SUPERSCRIPT" => 1,
+                                "SUBSCRIPT" => -1,
+                                _ => 0,
+                            };
+                        }
+                        if let Some(sz) = ts.get("fontSize").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
+                            st.size = (sz as f32).clamp(MIN_SIZE, MAX_SIZE);
+                        }
+                        if let Some(ff) = ts.get("weightedFontFamily").and_then(|x| x.get("fontFamily")).and_then(|x| x.as_str()) {
+                            st.font = font_index(ff);
+                        }
+                        let parse_rgb = |c_obj: &serde_json::Value| -> Option<[u8; 3]> {
+                            let rgb = c_obj.get("color")?.get("rgbColor")?;
+                            let r = (rgb.get("red").and_then(|x| x.as_f64()).unwrap_or(0.0) * 255.0).round() as u8;
+                            let g = (rgb.get("green").and_then(|x| x.as_f64()).unwrap_or(0.0) * 255.0).round() as u8;
+                            let b = (rgb.get("blue").and_then(|x| x.as_f64()).unwrap_or(0.0) * 255.0).round() as u8;
+                            Some([r, g, b])
+                        };
+                        if let Some(fg) = ts.get("foregroundColor").and_then(parse_rgb) {
+                            st.color = fg;
+                        }
+                        if let Some(bg) = ts.get("backgroundColor").and_then(parse_rgb) {
+                            st.highlight = Some(bg);
+                        }
+                        if let Some(url) = ts.get("link").and_then(|x| x.get("url")).and_then(|x| x.as_str()) {
+                            st.link = doc.add_link(url);
+                            st.underline = true;
+                            if st.color == [0, 0, 0] {
+                                st.color = [11, 87, 208];
+                            }
+                        }
+                    }
+                    for ch in txt.chars() {
+                        p.text.push(ch);
+                        p.styles.push(st);
+                    }
+                    p.end_style = st;
+                }
+            }
+            doc.paras.push(p);
+        }
+        if doc.paras.is_empty() {
+            doc.paras.push(Para::new(CharStyle::default(), ParaFmt::default()));
+        }
+        return Ok(doc);
+    }
+    // 3. Google Drive for Desktop shortcut .gdoc ({"url": ..., "doc_id": ..., "email": ...})
+    if v.get("url").is_some() || v.get("doc_id").is_some() {
+        let mut doc = Document::default();
+        let doc_id = v.get("doc_id").and_then(|x| x.as_str()).unwrap_or("");
+        let url = v.get("url").and_then(|x| x.as_str()).map_or_else(|| format!("https://docs.google.com/document/d/{doc_id}/edit"), |u| u.to_string());
+        let email = v.get("email").and_then(|x| x.as_str()).unwrap_or("");
+        doc.info.author = email.to_string();
+        doc.info.notes = format!("Google Docs ID: {doc_id}\nURL: {url}");
+        let lid = doc.add_link(&url);
+        let link_style = CharStyle {
+            color: [11, 87, 208],
+            underline: true,
+            link: lid,
+            ..CharStyle::default()
+        };
+        let pos = doc.insert_text(Pos::new(0, 0), &url, link_style);
+        doc.split(pos);
+        return Ok(doc);
+    }
+    Err("unrecognized Google Docs (.gdoc) structure".into())
+}
+
+// ───────────────────────── Markdown & HTML export / import ─────────────────────────
+
+pub fn to_markdown(doc: &Document) -> String {
+    let mut out = String::new();
+    let styles = named_styles();
+    for (pi, p) in doc.paras.iter().enumerate() {
+        if p.fmt.hr {
+            out.push_str("---\n\n");
+            continue;
+        }
+        let sname = styles.get(p.fmt.style).map_or("Default Text", |s| s.name);
+        match sname {
+            "Title" => out.push_str("# "),
+            "Subtitle" => out.push_str("## "),
+            "Heading 1" => out.push_str("# "),
+            "Heading 2" => out.push_str("## "),
+            "Heading 3" => out.push_str("### "),
+            "Quote" => out.push_str("> "),
+            _ => {}
+        }
+        let indent = "  ".repeat(p.fmt.indent as usize);
+        match p.fmt.list {
+            ListKind::Bullet => out.push_str(&format!("{indent}- ")),
+            ListKind::Number => out.push_str(&format!("{indent}{}. ", doc.list_number(pi))),
+            ListKind::Checklist => out.push_str(&format!("{indent}- [{}] ", if p.fmt.checked { "x" } else { " " })),
+            ListKind::None => {}
+        }
+        for (a, b, s) in p.runs() {
+            let txt: String = p.text[a..b].iter().collect();
+            let mut seg = txt;
+            if s.bold {
+                seg = format!("**{seg}**");
+            }
+            if s.italic {
+                seg = format!("*{seg}*");
+            }
+            if s.strike {
+                seg = format!("~~{seg}~~");
+            }
+            if let Some(url) = doc.link_url(s.link) {
+                seg = format!("[{seg}]({url})");
+            }
+            out.push_str(&seg);
+        }
+        out.push('\n');
+        if p.fmt.list == ListKind::None {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+pub fn from_markdown(src: &str) -> Document {
+    let mut doc = Document { paras: Vec::new(), ..Default::default() };
+    let styles = named_styles();
+    for raw_line in src.replace("\r\n", "\n").lines() {
+        let trimmed = raw_line.trim_end();
+        if trimmed == "---" || trimmed == "***" {
+            let mut p = Para::new(CharStyle::default(), ParaFmt::default());
+            p.fmt.hr = true;
+            doc.paras.push(p);
+            continue;
+        }
+        let mut fmt = ParaFmt::default();
+        let mut base = CharStyle::default();
+        let mut text = trimmed;
+        if let Some(rest) = text.strip_prefix("### ") {
+            fmt = ParaFmt { style: 6, ..styles[6].fmt };
+            base = styles[6].chr;
+            text = rest;
+        } else if let Some(rest) = text.strip_prefix("## ") {
+            fmt = ParaFmt { style: 5, ..styles[5].fmt };
+            base = styles[5].chr;
+            text = rest;
+        } else if let Some(rest) = text.strip_prefix("# ") {
+            fmt = ParaFmt { style: 4, ..styles[4].fmt };
+            base = styles[4].chr;
+            text = rest;
+        } else if let Some(rest) = text.strip_prefix("> ") {
+            fmt = ParaFmt { style: 7, ..styles[7].fmt };
+            base = styles[7].chr;
+            text = rest;
+        } else if let Some(rest) = text.strip_prefix("- [x] ").or_else(|| text.strip_prefix("- [X] ")) {
+            fmt.list = ListKind::Checklist;
+            fmt.checked = true;
+            text = rest;
+        } else if let Some(rest) = text.strip_prefix("- [ ] ").or_else(|| text.strip_prefix("[] ")) {
+            fmt.list = ListKind::Checklist;
+            fmt.checked = false;
+            text = rest;
+        } else if let Some(rest) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+            fmt.list = ListKind::Bullet;
+            text = rest;
+        } else if let Some(dot) = text.find(". ") {
+            if dot > 0 && text[..dot].chars().all(|c| c.is_ascii_digit()) {
+                fmt.list = ListKind::Number;
+                text = &text[dot + 2..];
+            }
+        }
+        let mut p = Para::new(base, fmt);
+        for ch in text.chars() {
+            p.text.push(ch);
+            p.styles.push(base);
+        }
+        doc.paras.push(p);
+    }
+    if doc.paras.is_empty() {
+        doc.paras.push(Para::new(CharStyle::default(), ParaFmt::default()));
+    }
+    doc
+}
+
+pub fn to_html(doc: &Document) -> String {
+    let mut out = String::from("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>");
+    out.push_str(if doc.info.title.is_empty() { "Document" } else { &doc.info.title });
+    out.push_str("</title><style>body{max-width:816px;margin:40px auto;padding:0 48px;font-family:Calibri,sans-serif;line-height:1.4;color:#1f1f1f;}</style></head><body>\n");
+    for p in &doc.paras {
+        if p.fmt.hr {
+            out.push_str("<hr>\n");
+            continue;
+        }
+        let align = match p.fmt.align {
+            Align::Left => "left",
+            Align::Center => "center",
+            Align::Right => "right",
+            Align::Justify => "justify",
+        };
+        out.push_str(&format!("<p style=\"text-align:{align};\">"));
+        if p.fmt.list == ListKind::Checklist {
+            out.push_str(if p.fmt.checked { "☑ " } else { "☐ " });
+        } else if p.fmt.list == ListKind::Bullet {
+            out.push_str("• ");
+        }
+        for (a, b, s) in p.runs() {
+            let txt: String = p.text[a..b]
+                .iter()
+                .map(|c| match c {
+                    '&' => "&amp;".to_string(),
+                    '<' => "&lt;".to_string(),
+                    '>' => "&gt;".to_string(),
+                    _ => c.to_string(),
+                })
+                .collect();
+            let mut span = txt;
+            if s.bold {
+                span = format!("<b>{span}</b>");
+            }
+            if s.italic {
+                span = format!("<i>{span}</i>");
+            }
+            if s.underline {
+                span = format!("<u>{span}</u>");
+            }
+            if s.strike {
+                span = format!("<s>{span}</s>");
+            }
+            if let Some(c2) = s.color_to {
+                if c2 != s.color {
+                    let c1 = s.color;
+                    span = format!(
+                        "<span style=\"background:linear-gradient(90deg,rgb({},{},{}),rgb({},{},{}));-webkit-background-clip:text;-webkit-text-fill-color:transparent;\">{span}</span>",
+                        c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]
+                    );
+                }
+            }
+            if let (Some(c1), Some(c2)) = (s.highlight, s.highlight_to) {
+                if c1 != c2 {
+                    span = format!(
+                        "<mark style=\"background:linear-gradient(90deg,rgb({},{},{}),rgb({},{},{}));border-radius:3px;padding:0 2px;\">{span}</mark>",
+                        c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]
+                    );
+                } else {
+                    span = format!("<mark style=\"background-color:rgb({},{},{});\">{span}</mark>", c1[0], c1[1], c1[2]);
+                }
+            } else if let Some(c1) = s.highlight {
+                span = format!("<mark style=\"background-color:rgb({},{},{});\">{span}</mark>", c1[0], c1[1], c1[2]);
+            }
+            if let Some(url) = doc.link_url(s.link) {
+                span = format!("<a href=\"{url}\">{span}</a>");
+            }
+            out.push_str(&span);
+        }
+        out.push_str("</p>\n");
+    }
+    out.push_str("</body></html>\n");
+    out
 }
 
 // ───────────────────────── RTF export / import ─────────────────────────
@@ -861,7 +1787,7 @@ pub fn to_rtf(doc: &Document) -> String {
             }
         }
     }
-    let mut out = String::from("{\\rtf1\\ansi\\deff0{\\fonttbl");
+    let mut out = format!("{{\\rtf1\\ansi\\deff{DEFAULT_FONT}{{\\fonttbl");
     for (i, f) in FONT_NAMES.iter().enumerate() {
         out.push_str(&format!("{{\\f{i} {f};}}"));
     }
@@ -903,6 +1829,7 @@ pub fn to_rtf(doc: &Document) -> String {
         match p.fmt.list {
             ListKind::Bullet => out.push_str("\\u8226?\\tab "),
             ListKind::Number => out.push_str(&format!("{}.\\tab ", doc.list_number(pi))),
+            ListKind::Checklist => out.push_str(if p.fmt.checked { "\\u9745?\\tab " } else { "\\u9744?\\tab " }),
             ListKind::None => {}
         }
         let runs = p.runs();
@@ -1052,7 +1979,7 @@ pub fn from_rtf(src: &str) -> Document {
                     }
                     "colortbl" | "stylesheet" | "info" | "pict" | "header" | "footer" | "listtable" | "listoverridetable" | "generator" => skip = true,
                     "f" if in_fonttbl => font_num = num.unwrap_or(0),
-                    "f" => st.font = *fonts.get(&num.unwrap_or(0)).unwrap_or(&0),
+                    "f" => st.font = *fonts.get(&num.unwrap_or(0)).unwrap_or(&DEFAULT_FONT),
                     "fs" => st.size = (num.unwrap_or(24) as f32 / 2.0).clamp(MIN_SIZE, MAX_SIZE),
                     "b" => st.bold = on,
                     "i" => st.italic = on,
@@ -1109,7 +2036,7 @@ pub fn from_rtf(src: &str) -> Document {
         }
     }
     // drop trailing empty paragraph created by the last \par
-    if doc.paras.len() > 1 && doc.paras.last().map(|p| p.text.is_empty()).unwrap_or(false) {
+    if doc.paras.len() > 1 && doc.paras.last().is_some_and(|p| p.text.is_empty()) {
         doc.paras.pop();
     }
     doc
@@ -1167,5 +2094,29 @@ mod tests {
         assert_eq!(find_all(&d, "cat", FindMode::WholeWords, false).len(), 1);
         assert_eq!(find_all(&d, "cat", FindMode::StartingWith, false).len(), 2);
         assert_eq!(find_all(&d, "cat", FindMode::EndingWith, false).len(), 2);
+    }
+    #[test]
+    fn gdoc_roundtrip_and_api_parse() {
+        let mut d = Document::default();
+        d.info.title = "Roadmap".into();
+        d.insert_text(Pos::new(0, 0), "Google Docs Title\nSecond line", CharStyle { bold: true, ..Default::default() });
+        let g = to_gdoc(&d);
+        let back = from_gdoc(&g).unwrap();
+        assert_eq!(back.plain_text(), d.plain_text());
+        assert_eq!(back.info.title, "Roadmap");
+        assert!(back.paras[0].styles[0].bold);
+
+        // Also test pure Google Docs REST API v1 JSON without `paras`
+        let mut v: serde_json::Value = serde_json::from_str(&g).unwrap();
+        v.as_object_mut().unwrap().remove("paras");
+        let api_back = from_gdoc(&v.to_string()).unwrap();
+        assert_eq!(api_back.plain_text(), d.plain_text());
+        assert!(api_back.paras[0].styles[0].bold);
+
+        // Also test Google Drive shortcut .gdoc
+        let shortcut = r#"{"url": "https://docs.google.com/open?id=123", "doc_id": "123", "email": "user@example.com"}"#;
+        let sc_doc = from_gdoc(shortcut).unwrap();
+        assert!(sc_doc.plain_text().contains("https://docs.google.com/open?id=123"));
+        assert_eq!(sc_doc.links.len(), 1);
     }
 }

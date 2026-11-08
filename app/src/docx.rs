@@ -181,7 +181,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
             body.push_str("<w:pageBreakBefore/>");
         }
         match p.fmt.list {
-            ListKind::Bullet => body.push_str(&format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"1\"/></w:numPr>", p.fmt.indent.min(8))),
+            ListKind::Bullet | ListKind::Checklist => body.push_str(&format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"1\"/></w:numPr>", p.fmt.indent.min(8))),
             ListKind::Number => body.push_str(&format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"2\"/></w:numPr>", p.fmt.indent.min(8))),
             ListKind::None => {}
         }
@@ -233,7 +233,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{body}</w:body></w:document>"
     );
 
-    let mut styles = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\"/><w:sz w:val=\"24\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>");
+    let mut styles = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\"/><w:sz w:val=\"24\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>");
     for (i, ns) in named_styles().iter().enumerate() {
         if let Some(id) = style_id(i) {
             let outline = match id {
@@ -357,7 +357,7 @@ fn tokens(xml: &str) -> Vec<Tok> {
             }
             out.push(Tok::Open(name, attrs, selfclose));
         } else {
-            let end = xml[i..].find('<').map(|e| i + e).unwrap_or(b.len());
+            let end = xml[i..].find('<').map_or(b.len(), |e| i + e);
             out.push(Tok::Text(unescape(&xml[i..end])));
             i = end;
         }
@@ -475,9 +475,9 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
         for t in tokens(&nb) {
             match t {
                 Tok::Open(n, a, _) if n == "w:abstractNum" => cur_abs = a.get("w:abstractNumId").cloned().unwrap_or_default(),
-                Tok::Open(n, a, _) if n == "w:lvl" => cur_lvl0 = a.get("w:ilvl").map(|v| v == "0").unwrap_or(false),
+                Tok::Open(n, a, _) if n == "w:lvl" => cur_lvl0 = a.get("w:ilvl").is_some_and(|v| v == "0"),
                 Tok::Open(n, a, _) if n == "w:numFmt" && cur_lvl0 => {
-                    abs_bullet.insert(cur_abs.clone(), a.get("w:val").map(|v| v == "bullet").unwrap_or(false));
+                    abs_bullet.insert(cur_abs.clone(), a.get("w:val").is_some_and(|v| v == "bullet"));
                 }
                 Tok::Open(n, a, _) if n == "w:num" => cur_num = a.get("w:numId").cloned().unwrap_or_default(),
                 Tok::Open(n, a, _) if n == "w:abstractNumId" => {
@@ -558,12 +558,12 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                     let Some(p) = para.as_mut() else { continue };
                     match n.as_str() {
                         "w:pStyle" => {
-                            let idx = a.get("w:val").map(|v| style_index(v)).unwrap_or(0);
+                            let idx = a.get("w:val").map_or(0, |v| style_index(v));
                             if idx != 0 {
                                 p.fmt = ParaFmt { style: idx, page_break_before: p.fmt.page_break_before, ..styles[idx].fmt };
                                 para_base = styles[idx].chr;
                                 mark = styles[idx].chr;
-                            } else if a.get("w:val").map(|v| v.to_lowercase().contains("list")).unwrap_or(false) {
+                            } else if a.get("w:val").is_some_and(|v| v.to_lowercase().contains("list")) {
                                 p.fmt.list = ListKind::Bullet;
                             }
                         }
@@ -582,7 +582,7 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                             if let Some(v) = a.get("w:after").and_then(|v| v.parse::<f32>().ok()) {
                                 p.fmt.space_after = (v / 20.0).clamp(0.0, 72.0);
                             }
-                            if a.get("w:lineRule").map(|r| r == "auto").unwrap_or(true) {
+                            if a.get("w:lineRule").is_none_or(|r| r == "auto") {
                                 if let Some(v) = a.get("w:line").and_then(|v| v.parse::<f32>().ok()) {
                                     p.fmt.line_spacing = (v / 240.0).clamp(1.0, 3.0);
                                 }
@@ -606,7 +606,7 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                     }
                 }
                 "w:br" | "w:cr" if in_run => {
-                    if a.get("w:type").map(|t| t == "page").unwrap_or(false) {
+                    if a.get("w:type").is_some_and(|t| t == "page") {
                         if let Some(p) = para.take() {
                             doc.paras.push(p);
                         }

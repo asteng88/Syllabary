@@ -29,3 +29,18 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+redundant_clone = "warn"
+clone_on_copy = "warn"
+map_unwrap_or = "warn"
+needless_collect = "warn"
+manual_ok_or = "warn"
+unnecessary_wraps = "warn"
+

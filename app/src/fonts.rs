@@ -5,7 +5,7 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::doc::{bundled_folder, FONT_NAMES};
+use crate::doc::{bundled_folder, DEFAULT_FONT, FONT_NAMES};
 use std::path::PathBuf;
 
 /// The fonts/ folder shipped next to the program (or found above it while developing).
@@ -67,8 +67,8 @@ impl FontBook {
         if let Some(Some(name)) = self.faces.get(&(font, 0)) {
             return (FontFamily::Name(name.clone().into()), italic);
         }
-        if font != 0 {
-            return self.family(0, bold, italic);
+        if font != DEFAULT_FONT {
+            return self.family(DEFAULT_FONT, bold, italic);
         }
         (FontFamily::Proportional, italic)
     }
@@ -134,9 +134,24 @@ pub fn install(ctx: &egui::Context) -> FontBook {
 
     // Symbol fallback for bullets, arrows and other special characters.
     let mut fallbacks: Vec<String> = Vec::new();
-    for (key, file) in [("sym:segoe-symbol", "seguisym.ttf"), ("sym:segoe-ui", "segoeui.ttf")] {
+    for (key, file) in [("sym:win-emoji", "seguiemj.ttf"), ("sym:segoe-symbol", "seguisym.ttf"), ("sym:segoe-ui", "segoeui.ttf")] {
         if let Some(d) = load(file) {
             defs.font_data.insert(key.into(), Arc::new(d));
+            fallbacks.push(key.into());
+        }
+    }
+    for (key, abs_path) in [
+        ("sym:mac-emoji", "/System/Library/Fonts/Apple Color Emoji.ttc"),
+        ("sym:mac-symbols", "/System/Library/Fonts/Supplemental/Apple Symbols.ttf"),
+        ("sym:mac-symbols-root", "/System/Library/Fonts/Apple Symbols.ttf"),
+        ("sym:linux-noto-emoji", "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf"),
+        ("sym:linux-noto-color", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+        ("sym:linux-noto-emoji-2", "/usr/share/fonts/noto/NotoEmoji-Regular.ttf"),
+        ("sym:linux-symbola", "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf"),
+        ("sym:linux-dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ] {
+        if let Ok(bytes) = std::fs::read(abs_path) {
+            defs.font_data.insert(key.into(), Arc::new(FontData::from_owned(strip_ebdt(bytes))));
             fallbacks.push(key.into());
         }
     }
@@ -175,7 +190,7 @@ pub fn install(ctx: &egui::Context) -> FontBook {
         chain.extend(egui_defaults.iter().cloned());
         defs.families.insert(FontFamily::Name("ui-bold".into()), chain);
     } else {
-        defs.families.insert(FontFamily::Name("ui-bold".into()), egui_defaults.clone());
+        defs.families.insert(FontFamily::Name("ui-bold".into()), egui_defaults);
     }
     for f in &fallbacks {
         if let Some(list) = defs.families.get_mut(&FontFamily::Proportional) {
