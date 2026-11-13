@@ -50,6 +50,8 @@ pub enum Action {
     FormatPainter,
     ToggleNav,
     ToggleComments,
+    ToggleHistory,
+    OpenNameVersion,
     ToggleSpell,
     TogglePageless,
     ToggleStar,
@@ -83,6 +85,10 @@ pub enum Action {
     InsertToc,
     InsertBuildingBlock(&'static str),
     InsertSmartChip(&'static str),
+    InsertImage,
+    #[allow(dead_code)]
+    InsertImagePath(PathBuf),
+    ReplaceImage(u64),
     InsertLink { text: String, url: String },
     RemoveLink(Pos),
     OpenLink(String),
@@ -116,6 +122,33 @@ pub enum Action {
     SelectTab(usize),
     NextTab,
     PageEdit(PageEdit),
+    InsertTable {
+        rows: usize,
+        cols: usize,
+        header_shading: Option<[u8; 3]>,
+    },
+    TableInsertRow {
+        above: bool,
+    },
+    TableDeleteRow,
+    TableInsertCol {
+        left: bool,
+    },
+    TableDeleteCol,
+    TableMergeRight,
+    TableMergeRow,
+    TableSplitCell,
+    TableCellShading(Option<[u8; 3]>),
+    TableRowShading(Option<[u8; 3]>),
+    TableCellVAlign(CellVAlign),
+    TableCellHAlign(Align),
+    TableToggleWrap,
+    TableSelectRow,
+    TableSelectCol,
+    TableAutoFitCol,
+    TableAutoFitRow,
+    TableCellFormula(Option<String>),
+    OpenTableMath,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -213,6 +246,9 @@ pub struct App {
     pub speller: crate::spell::Speller,
     pub show_nav: bool,
     pub show_comments: bool,
+    pub show_history: bool,
+    pub history_sel_idx: usize,
+    pub history_ver_name: String,
     pub mode: DocMode,
     pub font_search: String,
     pub demo_done: bool,
@@ -220,6 +256,7 @@ pub struct App {
     pub editing_title: bool,
     pub comment_reply_draft: (u64, String),
     pub wc_metric: u8,
+    pub table_panel_collapsed: bool,
 }
 
 impl App {
@@ -271,6 +308,9 @@ impl App {
             speller: crate::spell::Speller::new(),
             show_nav: false,
             show_comments: false,
+            show_history: false,
+            history_sel_idx: 0,
+            history_ver_name: String::new(),
             mode: DocMode::Editing,
             font_search: String::new(),
             demo_done: false,
@@ -278,6 +318,7 @@ impl App {
             editing_title: false,
             comment_reply_draft: (0, String::new()),
             wc_metric: 0,
+            table_panel_collapsed: false,
         };
         app.rebuild_sc_table();
         for p in open {
@@ -541,27 +582,35 @@ impl App {
         }
     }
 
-    fn export_pdf(&mut self, ctx: &egui::Context, print: bool) {
+    fn export_pdf(&mut self, ctx: &egui::Context) {
         let t = self.tab_ref();
         let base = t.name.split('.').next().unwrap_or("Document").to_string();
-        let bytes = crate::pdf::export(ctx, &t.doc, &self.book);
-        let path = if print {
-            let dir = std::env::temp_dir().join("ScribePro");
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join(format!("{base} (print).pdf"))
-        } else {
-            match rfd::FileDialog::new().set_file_name(format!("{base}.pdf")).add_filter("PDF", &["pdf"]).save_file() {
-                Some(p) => p,
-                None => return,
-            }
+        let Some(path) = rfd::FileDialog::new().set_file_name(format!("{base}.pdf")).add_filter("PDF", &["pdf"]).save_file() else {
+            return;
         };
+        let bytes = crate::pdf::export(ctx, &t.doc, &self.book);
         match std::fs::write(&path, bytes) {
-            Ok(()) if print => {
-                let _ = std::process::Command::new("explorer").arg(&path).spawn();
-                self.toast("Opened a print-ready PDF in your PDF viewer — print from there.".into());
-            }
             Ok(()) => self.toast(format!("Exported to {}", path.display())),
             Err(e) => self.toast(format!("Couldn't write the PDF: {e}")),
+        }
+    }
+
+    fn print_doc(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        {
+            let doc = self.tab_ref().doc.clone();
+            let base = self.tab_ref().name.split('.').next().unwrap_or("Document").to_string();
+            match crate::print::print_native_windows(ctx, &doc, &self.book, &base) {
+                crate::print::PrintOutcome::Printed(msg) => self.toast(msg),
+                crate::print::PrintOutcome::Cancelled => {}
+                crate::print::PrintOutcome::Error(err) => self.toast(err),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = ctx;
+            let pages = self.tab_ref().cached_pages().max(1);
+            self.dialog = Dialog::Print(crate::print::PrintJobConfig::discover(pages));
         }
     }
 
@@ -739,31 +788,12 @@ impl App {
                 p = end.p;
             }
             "table_2x2" => {
-                let ns = &styles[10];
-                for row in [
-                    "┌──────────────────────────┬──────────────────────────┐",
-                    "│ Column 1                 │ Column 2                 │",
-                    "├──────────────────────────┼──────────────────────────┤",
-                    "│ Item A                   │ Value 1                  │",
-                    "│ Item B                   │ Value 2                  │",
-                    "└──────────────────────────┴──────────────────────────┘",
-                ] {
-                    add_line(&mut t.doc, &mut p, 10, ListKind::None, false, row);
-                    let _ = ns;
-                }
+                let first_cell = t.doc.insert_table(Pos::new(p, 0), 2, 2);
+                p = first_cell.p;
             }
             "table_3x3" => {
-                for row in [
-                    "┌───────────────────┬───────────────────┬───────────────────┐",
-                    "│ Deliverable       │ Owner             │ Status            │",
-                    "├───────────────────┼───────────────────┼───────────────────┤",
-                    "│ Design Spec       │ @Design           │ Approved          │",
-                    "│ Implementation    │ @Engineering      │ In Progress       │",
-                    "│ Verification      │ @QA               │ Not Started       │",
-                    "└───────────────────┴───────────────────┴───────────────────┘",
-                ] {
-                    add_line(&mut t.doc, &mut p, 10, ListKind::None, false, row);
-                }
+                let first_cell = t.doc.insert_table(Pos::new(p, 0), 3, 3);
+                p = first_cell.p;
             }
             _ => {}
         }
@@ -864,8 +894,8 @@ impl App {
                 Action::ExportGdoc => self.export("gdoc"),
                 Action::ExportMd => self.export("md"),
                 Action::ExportHtml => self.export("html"),
-                Action::ExportPdf => self.export_pdf(ctx, false),
-                Action::Print => self.export_pdf(ctx, true),
+                Action::ExportPdf => self.export_pdf(ctx),
+                Action::Print => self.print_doc(ctx),
                 Action::LineSpacing(ls) => self.tab().apply_para(now, &move |f| f.line_spacing = ls),
                 Action::SpaceBefore(sb) => self.tab().apply_para(now, &move |f| f.space_before = sb.max(0.0)),
                 Action::SpaceAfter(sa) => self.tab().apply_para(now, &move |f| f.space_after = sa.max(0.0)),
@@ -882,6 +912,13 @@ impl App {
                 }
                 Action::ToggleNav => self.show_nav = !self.show_nav,
                 Action::ToggleComments => self.show_comments = !self.show_comments,
+                Action::ToggleHistory => self.show_history = !self.show_history,
+                Action::OpenNameVersion => {
+                    self.show_history = true;
+                    if self.history_ver_name.trim().is_empty() {
+                        self.history_ver_name = "Milestone".into();
+                    }
+                }
                 Action::ToggleSpell => {
                     self.cfg.spellcheck = !self.cfg.spellcheck;
                     self.save_config();
@@ -985,6 +1022,8 @@ impl App {
                     self.cfg.dark = !self.cfg.dark;
                     self.theme = if self.cfg.dark { Theme::dark() } else { Theme::light() };
                     self.theme.apply(ctx);
+                    self.fonts_rev = self.fonts_rev.wrapping_add(1);
+                    ctx.request_repaint();
                     self.save_config();
                 }
                 Action::PageBreak => self.tab().page_break(now),
@@ -1026,6 +1065,29 @@ impl App {
                 Action::InsertToc => self.insert_toc(now),
                 Action::InsertBuildingBlock(k) => self.insert_building_block(k, now),
                 Action::InsertSmartChip(k) => self.insert_smart_chip(k, now),
+                Action::InsertImage => {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title("Insert Image from File")
+                        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "ico", "tga"])
+                        .add_filter("All files", &["*"])
+                        .pick_file()
+                    {
+                        self.insert_image_from_path(&p, now);
+                    }
+                }
+                Action::InsertImagePath(p) => {
+                    self.insert_image_from_path(&p, now);
+                }
+                Action::ReplaceImage(img_id) => {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title("Replace Image from File")
+                        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "ico", "tga"])
+                        .add_filter("All files", &["*"])
+                        .pick_file()
+                    {
+                        self.replace_image_from_path(img_id, &p, now);
+                    }
+                }
                 Action::InsertLink { text, url } => {
                     let t = self.tab();
                     t.checkpoint(EditKind::Other, now);
@@ -1254,6 +1316,321 @@ impl App {
                     t.changed();
                     t.scroll_to_caret = false;
                 }
+                Action::InsertTable {
+                    rows,
+                    cols,
+                    header_shading,
+                } => {
+                    let t = self.tab();
+                    t.checkpoint(EditKind::Other, now);
+                    let pos = t.doc.insert_table(t.caret, rows, cols);
+                    let tid = t.doc.paras[pos.p].fmt.table_id;
+                    if let Some(shd) = header_shading {
+                        t.doc.table_set_row_shading(tid, 0, Some(shd));
+                        let luma = 0.299 * (shd[0] as f32) + 0.587 * (shd[1] as f32) + 0.114 * (shd[2] as f32);
+                        let hdr_color = if luma < 155.0 { [255, 255, 255] } else { [0, 0, 0] };
+                        for p in &mut t.doc.paras {
+                            if p.fmt.table_id == tid && p.fmt.table_row == 0 {
+                                p.end_style.bold = true;
+                                p.end_style.color = hdr_color;
+                            }
+                        }
+                    }
+                    t.set_caret(pos, false);
+                    t.changed();
+                    self.toast(format!("Inserted {cols} × {rows} table."));
+                }
+                Action::TableInsertRow { above } => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if let Some(np) = t.doc.table_insert_row(fmt.table_id, fmt.table_row as usize, above) {
+                            t.set_caret(np, false);
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableDeleteRow => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if let Some(np) = t.doc.table_delete_row(fmt.table_id, fmt.table_row as usize) {
+                            t.set_caret(np, false);
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableInsertCol { left } => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if let Some(np) = t.doc.table_insert_col(fmt.table_id, fmt.table_col as usize, left) {
+                            t.set_caret(np, false);
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableDeleteCol => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if let Some(np) = t.doc.table_delete_col(fmt.table_id, fmt.table_col as usize) {
+                            t.set_caret(np, false);
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableMergeRight => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if t.doc.table_merge_right(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize) {
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableMergeRow => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if t.doc.table_merge_row(fmt.table_id, fmt.table_row as usize) {
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableSplitCell => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if t.doc.table_split_cell(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize) {
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableCellShading(shd) => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if !t.selected_cells.is_empty() {
+                            let sel = t.selected_cells.clone();
+                            for (tid, r, c) in sel {
+                                t.doc.table_set_cell_shading(tid, r as usize, c as usize, shd);
+                            }
+                        } else {
+                            t.doc
+                                .table_set_cell_shading(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize, shd);
+                        }
+                        t.changed();
+                    }
+                }
+                Action::TableRowShading(shd) => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        t.doc.table_set_row_shading(fmt.table_id, fmt.table_row as usize, shd);
+                        t.changed();
+                    }
+                }
+                Action::TableCellVAlign(va) => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if !t.selected_cells.is_empty() {
+                            let sel = t.selected_cells.clone();
+                            for (tid, r, c) in sel {
+                                t.doc.table_set_cell_valign(tid, r as usize, c as usize, va);
+                            }
+                        } else {
+                            t.doc
+                                .table_set_cell_valign(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize, va);
+                        }
+                        t.changed();
+                    }
+                }
+                Action::TableCellHAlign(al) => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        if !t.selected_cells.is_empty() {
+                            let sel = t.selected_cells.clone();
+                            for (tid, r, c) in sel {
+                                t.doc.table_set_cell_halign(tid, r as usize, c as usize, al);
+                            }
+                        } else {
+                            t.doc
+                                .table_set_cell_halign(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize, al);
+                        }
+                        t.changed();
+                    }
+                }
+                Action::TableToggleWrap => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        let cur_wrap = t
+                            .doc
+                            .table(fmt.table_id)
+                            .and_then(|tb| tb.rows.get(fmt.table_row as usize))
+                            .and_then(|rw| rw.cells.get(fmt.table_col as usize))
+                            .is_none_or(|c| c.wrap_text);
+                        let new_wrap = !cur_wrap;
+                        t.checkpoint(EditKind::Other, now);
+                        if !t.selected_cells.is_empty() {
+                            let sel = t.selected_cells.clone();
+                            for (tid, r, c) in sel {
+                                t.doc.table_set_cell_wrap(tid, r as usize, c as usize, new_wrap);
+                            }
+                        } else {
+                            t.doc
+                                .table_set_cell_wrap(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize, new_wrap);
+                        }
+                        t.changed();
+                    }
+                }
+                Action::TableSelectRow => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.select_table_row(fmt.table_id, fmt.table_row as usize);
+                    }
+                }
+                Action::TableSelectCol => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.select_table_col(fmt.table_id, fmt.table_col as usize);
+                    }
+                }
+                Action::TableAutoFitCol => {
+                    let fmt = {
+                        let t = self.tab_ref();
+                        t.doc.paras[t.doc.clamp(t.caret).p].fmt
+                    };
+                    if fmt.table_id > 0 {
+                        let auto_w = layout::measure_column_autofit_width_in(
+                            ctx,
+                            &self.tab_ref().doc,
+                            &self.book,
+                            fmt.table_id,
+                            fmt.table_row as usize,
+                            fmt.table_col as usize,
+                        );
+                        if let Some(w_in) = auto_w {
+                            let t = self.tab();
+                            t.checkpoint(EditKind::Other, now);
+                            t.doc
+                                .table_resize_col(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize, w_in);
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableAutoFitRow => {
+                    let fmt = {
+                        let t = self.tab_ref();
+                        t.doc.paras[t.doc.clamp(t.caret).p].fmt
+                    };
+                    if fmt.table_id > 0 {
+                        let auto_h = layout::measure_row_autofit_height_pt(ctx, &self.tab_ref().doc, &self.book, fmt.table_id, fmt.table_row as usize);
+                        if let Some(h_pt) = auto_h {
+                            let t = self.tab();
+                            t.checkpoint(EditKind::Other, now);
+                            t.doc.table_resize_row(fmt.table_id, fmt.table_row as usize, h_pt);
+                            t.changed();
+                        }
+                    }
+                }
+                Action::TableCellFormula(f_opt) => {
+                    let t = self.tab();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    if fmt.table_id > 0 {
+                        t.checkpoint(EditKind::Other, now);
+                        t.doc
+                            .table_set_cell_formula(fmt.table_id, fmt.table_row as usize, fmt.table_col as usize, f_opt);
+                        let end_c = t.doc.paras.get(t.caret.p).map_or(0, |p| p.len());
+                        t.set_caret(Pos::new(t.caret.p, end_c), false);
+                        t.changed();
+                    }
+                }
+                Action::OpenTableMath => {
+                    let fmt = {
+                        let t = self.tab_ref();
+                        t.doc.paras[t.doc.clamp(t.caret).p].fmt
+                    };
+                    if fmt.table_id > 0 {
+                        let r = fmt.table_row as usize;
+                        let c = fmt.table_col as usize;
+                        let mut op = TableMathOp::Sum;
+                        let mut use_above = r > 0;
+                        let mut use_left = r == 0 && c > 0;
+                        let mut chosen = Vec::new();
+                        let mut keep_sig_figs = true;
+                        if let Some(existing) = self
+                            .tab_ref()
+                            .doc
+                            .table(fmt.table_id)
+                            .and_then(|tb| tb.rows.get(r))
+                            .and_then(|rw| rw.cells.get(c))
+                            .and_then(|cl| cl.formula.clone())
+                        {
+                            let s = existing.trim().strip_prefix('=').unwrap_or(existing.trim()).trim();
+                            if let (Some(op_i), Some(cl_i)) = (s.find('('), s.rfind(')')) {
+                                let op_n = s[..op_i].trim().to_ascii_uppercase();
+                                op = match op_n.as_str() {
+                                    "SUBTOTAL" => TableMathOp::Subtotal,
+                                    "AVERAGE" | "AVG" => TableMathOp::Average,
+                                    "MEDIAN" => TableMathOp::Median,
+                                    _ => TableMathOp::Sum,
+                                };
+                                let inside = s[op_i + 1..cl_i].trim();
+                                let (args_s, sig) = if let Some((l, r_s)) = inside.rsplit_once(';') {
+                                    (l.trim(), !r_s.trim().eq_ignore_ascii_case("RAW"))
+                                } else {
+                                    (inside, true)
+                                };
+                                keep_sig_figs = sig;
+                                if args_s.eq_ignore_ascii_case("ABOVE") {
+                                    use_above = true;
+                                    use_left = false;
+                                } else if args_s.eq_ignore_ascii_case("LEFT") {
+                                    use_left = true;
+                                    use_above = false;
+                                } else {
+                                    use_above = false;
+                                    use_left = false;
+                                    for tok in args_s.split(',') {
+                                        if let Some(rc) = parse_cell_coord(tok) {
+                                            chosen.push(rc);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.dialog = Dialog::TableMath {
+                            table_id: fmt.table_id,
+                            row: r,
+                            col: c,
+                            op,
+                            use_above,
+                            use_left,
+                            chosen,
+                            keep_sig_figs,
+                        };
+                        refocus = false;
+                    } else {
+                        self.toast("Place the cursor inside a table cell first to add a calculation.".into());
+                    }
+                }
             }
             if refocus {
                 ctx.memory_mut(|m| m.request_focus(self.doc_id));
@@ -1297,15 +1674,77 @@ impl App {
                 Cmd::Dictionary => Action::Dialog(Dialog::Dictionary),
                 Cmd::CompactMode => Action::ToggleCompact,
                 Cmd::SearchMenus => Action::Dialog(Dialog::SearchMenus(String::new())),
-                Cmd::VersionHistory => Action::Dialog(Dialog::VersionHistory(0, String::new())),
+                Cmd::VersionHistory => Action::ToggleHistory,
                 Cmd::AtMenu => Action::Dialog(Dialog::AtMenu(String::new())),
                 Cmd::Checklist => Action::List(ListKind::Checklist),
                 Cmd::BulletList => Action::List(ListKind::Bullet),
                 Cmd::NumberList => Action::List(ListKind::Number),
                 Cmd::DuplicatePara => Action::DuplicatePara,
                 Cmd::OpenComments => Action::ToggleComments,
+                Cmd::InsertImage => Action::InsertImage,
+                Cmd::ImageProps(id) => Action::Dialog(Dialog::ImageProps(id)),
             };
             self.actions.push(a);
+        }
+    }
+
+    pub fn insert_image_from_path(&mut self, path: &Path, now: f64) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.toast(format!("Couldn't read image {}: {e}", path.display()));
+                return;
+            }
+        };
+        let name = path
+            .file_name()
+            .map_or_else(|| "Image".into(), |n| n.to_string_lossy().to_string());
+        let next_id = self.tab_ref().doc.next_image_id();
+        let max_w_in = {
+            let pg = &self.tab_ref().doc.page;
+            (pg.width - pg.margin_left - pg.margin_right).max(1.5)
+        };
+        match DocImage::from_file_bytes(next_id, name.clone(), &bytes, max_w_in) {
+            Ok(img) => {
+                self.tab().insert_image(img, now);
+                self.toast(format!("Inserted image “{name}” — drag handles to resize or add a caption below."));
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
+    pub fn replace_image_from_path(&mut self, img_id: u64, path: &Path, now: f64) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.toast(format!("Couldn't read image {}: {e}", path.display()));
+                return;
+            }
+        };
+        let name = path
+            .file_name()
+            .map_or_else(|| "Image".into(), |n| n.to_string_lossy().to_string());
+        let max_w_in = {
+            let pg = &self.tab_ref().doc.page;
+            (pg.width - pg.margin_left - pg.margin_right).max(1.5)
+        };
+        match DocImage::from_file_bytes(img_id, name.clone(), &bytes, max_w_in) {
+            Ok(new_img) => {
+                let t = self.tab();
+                t.checkpoint(EditKind::Other, now);
+                if let Some(existing) = t.doc.image_mut(img_id) {
+                    let keep_cap = existing.caption.clone();
+                    let keep_w = existing.width_in;
+                    let aspect = new_img.aspect_ratio();
+                    *existing = new_img;
+                    existing.caption = keep_cap;
+                    existing.width_in = keep_w;
+                    existing.height_in = (keep_w / aspect).clamp(0.4, 20.0);
+                }
+                t.changed();
+                self.toast(format!("Replaced image with “{name}”."));
+            }
+            Err(e) => self.toast(e),
         }
     }
 
@@ -1633,6 +2072,20 @@ impl eframe::App for App {
             self.clean_screen = false;
         }
 
+        // Drag-and-drop image or document files from OS file explorer
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for df in dropped {
+            let p = df.path();
+            if !p.as_os_str().is_empty() {
+                let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "ico" | "tga") {
+                    self.insert_image_from_path(p, now);
+                } else {
+                    self.open_path(p);
+                }
+            }
+        }
+
         // window title, like "Scribe Pro - [Untitled1]"
         let title = format!("{APP_NAME} - [{}]", self.tab_ref().title());
         if title != self.title {
@@ -1710,6 +2163,284 @@ impl eframe::App for App {
                 .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
                 .show(ui, |ui| {
                     self.comments_pane(ui, &th);
+                });
+        }
+
+        if self.show_history && !self.clean_screen {
+            egui::Panel::right("version-history")
+                .resizable(true)
+                .default_size(290.0)
+                .min_size(240.0)
+                .max_size(420.0)
+                .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
+                .show(ui, |ui| {
+                    self.history_pane(ui, &th, now);
+                });
+        }
+
+        // Docked Right-Hand Table Studio Panel (pops out when caret is inside a table, without overlapping the document or scrollbar)
+        let active_tbl_info = if matches!(self.dialog, Dialog::None) && !self.clean_screen && self.tab_ref().selected_image.is_none() {
+            let t = self.tab_ref();
+            t.active_table_cell_rect.map(|(tid, crow, ccol, cell_r, tbl_r)| {
+                let r = crow as usize;
+                let c = ccol as usize;
+                let cell_spec = t
+                    .doc
+                    .table(tid)
+                    .and_then(|tb| tb.rows.get(r))
+                    .and_then(|rw| rw.cells.get(c))
+                    .cloned()
+                    .unwrap_or_default();
+                let can_merge_right = t
+                    .doc
+                    .table(tid)
+                    .and_then(|tb| tb.rows.get(r))
+                    .is_some_and(|rw| c + 1 < rw.cells.len());
+                let can_merge_row = t
+                    .doc
+                    .table(tid)
+                    .and_then(|tb| tb.rows.get(r))
+                    .is_some_and(|rw| rw.cells.len() > 1);
+                let h_align = t.doc.paras.get(t.doc.clamp(t.caret).p).map_or(Align::Left, |p| p.fmt.align);
+                let sel_count = t.selected_cells.len();
+                (tid, r, c, cell_r, tbl_r, cell_spec, h_align, can_merge_right, can_merge_row, sel_count)
+            })
+        } else {
+            None
+        };
+        if let Some((_tid, r, c, _cell_r, _tbl_r, cell_spec, cur_halign, can_merge_right, can_merge_row, sel_count)) = active_tbl_info {
+            let coord_lbl = if sel_count > 1 {
+                format!("{sel_count} cells")
+            } else {
+                format!("Cell {}", cell_coord_label(r, c))
+            };
+            if !self.table_panel_collapsed {
+                egui::Panel::right("table-studio-panel")
+                    .resizable(true)
+                    .default_size(244.0)
+                    .min_size(216.0)
+                    .max_size(340.0)
+                    .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(12, 10)).stroke(Stroke::new(1.0, th.border)))
+                    .show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("table-studio-scroll").show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                            icons::draw(ui.painter(), ir, Icon::Table, th.accent, th.accent);
+                            ui.label(RichText::new("Table").size(13.0).color(th.text).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(coord_lbl).size(11.5).color(th.accent).strong());
+                            });
+                        });
+                        if let Some(f) = &cell_spec.formula {
+                            ui.label(RichText::new(f).size(11.0).color(th.subtle).monospace());
+                        }
+                        ui.separator();
+
+                        // Shading
+                        ui.label(RichText::new("Cell Shading").size(11.5).color(th.subtle).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
+                            for &(name, rgb_opt) in dialogs::TABLE_SHADING_SWATCHES {
+                                let sel = cell_spec.shading == rgb_opt;
+                                let (sr, sresp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                                let fill = rgb_opt.map_or(Color32::WHITE, |rgb| Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                                ui.painter().rect_filled(sr.shrink(1.0), 3.0, fill);
+                                if rgb_opt.is_none() {
+                                    ui.painter().line_segment(
+                                        [sr.shrink(4.0).left_bottom(), sr.shrink(4.0).right_top()],
+                                        Stroke::new(1.2, Color32::from_rgb(220, 38, 38)),
+                                    );
+                                }
+                                let st = if sel { Stroke::new(1.8, th.accent) } else { Stroke::new(1.0, th.border) };
+                                ui.painter().rect_stroke(sr.shrink(1.0), 3.0, st, egui::StrokeKind::Inside);
+                                if sresp.on_hover_text(format!("Shade cell(s): {name}")).clicked() {
+                                    self.act(Action::TableCellShading(rgb_opt));
+                                }
+                            }
+                            if ui
+                                .small_button("Apply Row")
+                                .on_hover_text("Apply current cell's shading across the entire row")
+                                .clicked()
+                            {
+                                self.act(Action::TableRowShading(cell_spec.shading));
+                            }
+                        });
+                        ui.separator();
+
+                        // Alignment & Wrap
+                        ui.label(RichText::new("Alignment & Wrap").size(11.5).color(th.subtle).strong());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if icon_button(ui, &th, Icon::AlignLeft, "Align cell text left", cur_halign == Align::Left, true).clicked() {
+                                self.act(Action::TableCellHAlign(Align::Left));
+                            }
+                            if icon_button(ui, &th, Icon::AlignCenter, "Center cell text horizontally", cur_halign == Align::Center, true).clicked() {
+                                self.act(Action::TableCellHAlign(Align::Center));
+                            }
+                            if icon_button(ui, &th, Icon::AlignRight, "Align cell text right", cur_halign == Align::Right, true).clicked() {
+                                self.act(Action::TableCellHAlign(Align::Right));
+                            }
+                            ui.separator();
+                            if ui
+                                .selectable_label(cell_spec.wrap_text, RichText::new("↩ Wrap").size(11.5))
+                                .on_hover_text("Toggle text wrapping in cell(s)")
+                                .clicked()
+                            {
+                                self.act(Action::TableToggleWrap);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(RichText::new("Vertical:").size(11.0).color(th.subtle));
+                            for (va, lbl, tip) in [
+                                (CellVAlign::Top, "Top", "Align cell text to top"),
+                                (CellVAlign::Center, "Mid", "Center cell text vertically"),
+                                (CellVAlign::Bottom, "Bot", "Align cell text to bottom"),
+                            ] {
+                                if ui
+                                    .selectable_label(cell_spec.v_align == va, RichText::new(lbl).size(11.5))
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    self.act(Action::TableCellVAlign(va));
+                                }
+                            }
+                        });
+                        ui.separator();
+
+                        // Selection, Auto-Fit, Merge & Split
+                        ui.label(RichText::new("Cells & Merge").size(11.5).color(th.subtle).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            if ui
+                                .small_button("Sel Row")
+                                .on_hover_text("Select the entire current row (or click row number on left)")
+                                .clicked()
+                            {
+                                self.act(Action::TableSelectRow);
+                            }
+                            if ui
+                                .small_button("Sel Col")
+                                .on_hover_text("Select the entire current column (or click column letter on top)")
+                                .clicked()
+                            {
+                                self.act(Action::TableSelectCol);
+                            }
+                            if ui
+                                .small_button("↔ Fit")
+                                .on_hover_text("Auto-fit column width & row height to contents (or double-click cell edge)")
+                                .clicked()
+                            {
+                                self.act(Action::TableAutoFitCol);
+                                self.act(Action::TableAutoFitRow);
+                            }
+                            if ui
+                                .add_enabled(can_merge_right, egui::Button::new(RichText::new("Merge →").size(11.0)))
+                                .on_hover_text("Merge this cell with the cell to its right")
+                                .clicked()
+                            {
+                                self.act(Action::TableMergeRight);
+                            }
+                            if ui
+                                .add_enabled(can_merge_row, egui::Button::new(RichText::new("Merge Row").size(11.0)))
+                                .on_hover_text("Merge all cells in this row into a single banner cell")
+                                .clicked()
+                            {
+                                self.act(Action::TableMergeRow);
+                            }
+                            if ui
+                                .add_enabled(cell_spec.grid_span > 1, egui::Button::new(RichText::new("Split").size(11.0)))
+                                .on_hover_text("Split this merged cell back into individual columns")
+                                .clicked()
+                            {
+                                self.act(Action::TableSplitCell);
+                            }
+                        });
+                        ui.separator();
+
+                        // Rows & Columns
+                        ui.label(RichText::new("Rows & Columns").size(11.5).color(th.subtle).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            if ui.small_button("+Row ↑").on_hover_text("Insert row above").clicked() {
+                                self.act(Action::TableInsertRow { above: true });
+                            }
+                            if ui.small_button("+Row ↓").on_hover_text("Insert row below").clicked() {
+                                self.act(Action::TableInsertRow { above: false });
+                            }
+                            if ui.small_button("−Row").on_hover_text("Delete current row").clicked() {
+                                self.act(Action::TableDeleteRow);
+                            }
+                            if ui.small_button("+Col →").on_hover_text("Insert column to the right").clicked() {
+                                self.act(Action::TableInsertCol { left: false });
+                            }
+                            if ui.small_button("−Col").on_hover_text("Delete current column").clicked() {
+                                self.act(Action::TableDeleteCol);
+                            }
+                        });
+                        ui.separator();
+
+                        // Cell Math
+                        ui.label(RichText::new("Formulas").size(11.5).color(th.subtle).strong());
+                        let dir = if r > 0 { "ABOVE" } else { "LEFT" };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            for (lbl, fname, tip) in [
+                                ("∑ Sum", "SUM", "Calculate Sum (Total) keeping input significant figures"),
+                                ("Subtotal", "SUBTOTAL", "Calculate section Subtotal keeping input significant figures"),
+                                ("Avg", "AVERAGE", "Calculate Average keeping input significant figures"),
+                                ("Median", "MEDIAN", "Calculate Median keeping input significant figures"),
+                            ] {
+                                if ui.small_button(lbl).on_hover_text(tip).clicked() {
+                                    self.act(Action::TableCellFormula(Some(format!("={fname}({dir})"))));
+                                }
+                            }
+                            if ui
+                                .button(RichText::new("∑ Math…").size(11.0).color(th.accent).strong())
+                                .on_hover_text("Choose specific cells for Sum, Subtotal, Average, or Median")
+                                .clicked()
+                            {
+                                self.act(Action::OpenTableMath);
+                            }
+                        });
+                    });
+                });
+            }
+
+            // Small docked tab on the pop-out edge to hide/show the Table Studio panel without overlapping the document or scrollbar
+            egui::Panel::right("table-studio-tab")
+                .resizable(false)
+                .default_size(18.0)
+                .min_size(18.0)
+                .max_size(18.0)
+                .frame(Frame::new().fill(th.workspace).inner_margin(Margin::ZERO))
+                .show(ui, |ui| {
+                    let avail = ui.available_rect_before_wrap();
+                    let tab_h = 68.0_f32.min(avail.height().max(24.0));
+                    let tab_rect = egui::Rect::from_center_size(
+                        pos2(avail.center().x, avail.center().y),
+                        vec2(18.0, tab_h),
+                    );
+                    let resp = ui.interact(tab_rect, egui::Id::unique("table-studio-toggle-tab"), Sense::click());
+                    let bg = if resp.hovered() { th.hover } else { th.chrome };
+                    let cr = egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 };
+                    ui.painter().rect_filled(tab_rect, cr, bg);
+                    ui.painter().rect_stroke(tab_rect, cr, Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
+                    let glyph = if self.table_panel_collapsed { "‹" } else { "›" };
+                    let glyph_col = if resp.hovered() || self.table_panel_collapsed { th.accent } else { th.text };
+                    ui.painter().text(
+                        tab_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        egui::FontId::proportional(15.0),
+                        glyph_col,
+                    );
+                    let tip = if self.table_panel_collapsed { "Show Table panel" } else { "Hide Table panel" };
+                    if resp.on_hover_text(tip).clicked() {
+                        self.table_panel_collapsed = !self.table_panel_collapsed;
+                    }
                 });
         }
 
@@ -1860,6 +2591,135 @@ impl eframe::App for App {
                             });
                         });
                 });
+        }
+
+        // Floating Editorial Studio Image Bar (Resize + Inline Caption + Alignment) when an image is selected
+        let active_img_info = {
+            let t = self.tab_ref();
+            t.selected_image_rect.and_then(|(img_id, para_idx, full_r)| {
+                t.doc.image(img_id).cloned().map(|img| {
+                    let align = t.doc.paras.get(para_idx).map_or(Align::Center, |p| p.fmt.align);
+                    let max_w_in = (t.doc.page.width - t.doc.page.margin_left - t.doc.page.margin_right).max(1.0);
+                    (img, para_idx, full_r, align, max_w_in)
+                })
+            })
+        };
+        if let Some((img_snap, para_idx, full_r, cur_align, max_w_in)) = active_img_info {
+            if !matches!(self.dialog, Dialog::ImageProps(_)) && !self.clean_screen {
+                let screen = ctx.content_rect();
+                let bar_w = 500.0_f32;
+                let bar_x = (full_r.center().x - bar_w * 0.5).clamp(screen.min.x + 16.0, (screen.max.x - bar_w - 16.0).max(screen.min.x + 16.0));
+                let bar_y = if full_r.max.y + 84.0 < screen.max.y - 28.0 {
+                    full_r.max.y + 8.0
+                } else {
+                    (full_r.min.y - 78.0).max(screen.min.y + 84.0)
+                };
+                let mut w_in = img_snap.width_in;
+                let mut h_in = img_snap.height_in;
+                let mut caption = img_snap.caption.clone();
+                let mut align = cur_align;
+                let mut open_props = false;
+                let mut delete_img = false;
+                let nat_aspect = img_snap.aspect_ratio();
+
+                egui::Area::new(egui::Id::unique("image-studio-bar"))
+                    .fixed_pos(pos2(bar_x, bar_y))
+                    .order(egui::Order::Foreground)
+                    .show(&ctx, |ui| {
+                        Frame::new()
+                            .fill(th.surface_elevated)
+                            .corner_radius(10)
+                            .stroke(Stroke::new(1.0, th.border))
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 4],
+                                blur: 12,
+                                spread: 0,
+                                color: Color32::from_black_alpha(if th.dark { 90 } else { 28 }),
+                            })
+                            .inner_margin(Margin::symmetric(10, 7))
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 5.0;
+                                    // Row 1: Inline Caption Editor + Details + Delete
+                                    ui.horizontal(|ui| {
+                                        let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                                        icons::draw(ui.painter(), ir, Icon::Image, th.accent, th.accent);
+                                        ui.label(RichText::new("Caption:").size(11.5).color(th.subtle).strong());
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut caption)
+                                                .id_salt(("img-inline-cap", img_snap.id))
+                                                .desired_width(275.0)
+                                                .hint_text("Type a caption below image (e.g. Figure 1)…"),
+                                        );
+                                        if ui.small_button("Size & Caption…").on_hover_text("Open full image size & caption dialog").clicked() {
+                                            open_props = true;
+                                        }
+                                        if icon_button(ui, &th, Icon::Trash, "Remove image (Delete)", false, true).clicked() {
+                                            delete_img = true;
+                                        }
+                                    });
+                                    // Row 2: Quick Resize presets, +/- step, 1:1 aspect reset, and Alignment
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("Resize:").size(11.5).color(th.subtle).strong());
+                                        for (lbl, frac) in [("25%", 0.25_f32), ("50%", 0.50), ("75%", 0.75), ("100%", 1.0)] {
+                                            let active_p = ((w_in / max_w_in) - frac).abs() < 0.04;
+                                            if ui.selectable_label(active_p, RichText::new(lbl).size(11.5)).on_hover_text(format!("Scale image to {lbl} of page width")).clicked() {
+                                                w_in = (max_w_in * frac).clamp(0.5, max_w_in);
+                                                h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+                                            }
+                                        }
+                                        if ui.small_button("−").on_hover_text("Shrink image (-0.25 in)").clicked() {
+                                            w_in = (w_in - 0.25).clamp(0.5, max_w_in);
+                                            h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+                                        }
+                                        ui.label(RichText::new(format!("{w_in:.2}×{h_in:.2}\"")).size(11.0).color(th.subtle).monospace());
+                                        if ui.small_button("+").on_hover_text("Enlarge image (+0.25 in)").clicked() {
+                                            w_in = (w_in + 0.25).clamp(0.5, max_w_in);
+                                            h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+                                        }
+                                        if ui.small_button("1:1").on_hover_text("Reset aspect ratio").clicked() {
+                                            h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+                                        }
+                                        ui.separator();
+                                        if icon_button(ui, &th, Icon::AlignLeft, "Align image left", align == Align::Left, true).clicked() {
+                                            align = Align::Left;
+                                        }
+                                        if icon_button(ui, &th, Icon::AlignCenter, "Center image", align == Align::Center, true).clicked() {
+                                            align = Align::Center;
+                                        }
+                                        if icon_button(ui, &th, Icon::AlignRight, "Align image right", align == Align::Right, true).clicked() {
+                                            align = Align::Right;
+                                        }
+                                    });
+                                });
+                            });
+                    });
+
+                if (w_in - img_snap.width_in).abs() > 0.002
+                    || (h_in - img_snap.height_in).abs() > 0.002
+                    || caption != img_snap.caption
+                    || align != cur_align
+                {
+                    let kind = if caption != img_snap.caption { EditKind::Typing } else { EditKind::Other };
+                    let t = self.tab();
+                    t.checkpoint(kind, now);
+                    if let Some(img) = t.doc.image_mut(img_snap.id) {
+                        img.width_in = w_in;
+                        img.height_in = h_in;
+                        img.caption = caption;
+                    }
+                    if let Some(p) = t.doc.paras.get_mut(para_idx) {
+                        p.fmt.align = align;
+                    }
+                    t.changed();
+                    t.scroll_to_caret = false;
+                }
+                if open_props {
+                    self.act(Action::Dialog(Dialog::ImageProps(img_snap.id)));
+                } else if delete_img {
+                    self.tab().remove_image(img_snap.id, now);
+                }
+            }
         }
 
         // Google Docs floating "Display word count while typing" pill in the bottom-left

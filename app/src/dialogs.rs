@@ -6,7 +6,7 @@
 use eframe::egui::{self, vec2, RichText};
 use std::path::PathBuf;
 
-use crate::app::{gradient_swatch, swatch, text_gradient_swatch, Action, App, CRAFT_GRADIENT_HIGHLIGHTS, CRAFT_GRADIENT_TEXT, HIGHLIGHTS, PALETTE};
+use crate::app::{gradient_swatch, swatch, text_gradient_swatch, Action, App, PageEdit, ZoomMode, CRAFT_GRADIENT_HIGHLIGHTS, CRAFT_GRADIENT_TEXT, HIGHLIGHTS, PALETTE};
 use crate::doc::*;
 use crate::editor::{DocMode, EditKind};
 use crate::icons::{draw as draw_icon, Icon};
@@ -34,11 +34,28 @@ pub enum Dialog {
     Link { text: String, url: String },
     Comment(String),
     Bookmark(String),
-    VersionHistory(usize, String),
     Citations(CitationEntry),
     Dictionary,
     Rename(String),
+    #[cfg_attr(target_os = "windows", expect(dead_code, reason = "Constructed on macOS and Linux; Windows uses native PrintDlgW directly"))]
+    Print(crate::print::PrintJobConfig),
     DesignSheet,
+    ImageProps(u64),
+    InsertTable {
+        rows: usize,
+        cols: usize,
+        header_shading: Option<[u8; 3]>,
+    },
+    TableMath {
+        table_id: u32,
+        row: usize,
+        col: usize,
+        op: TableMathOp,
+        use_above: bool,
+        use_left: bool,
+        chosen: Vec<(usize, usize)>,
+        keep_sig_figs: bool,
+    },
 }
 
 struct FindCache {
@@ -823,12 +840,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 app.dialog = Dialog::Bookmark(name);
             }
         }
-        Dialog::VersionHistory(mut sel_idx, mut ver_name) => {
-            version_history_dialog(app, ctx, &mut open, &mut sel_idx, &mut ver_name, now);
-            if open && matches!(app.dialog, Dialog::VersionHistory(_, _)) {
-                app.dialog = Dialog::VersionHistory(sel_idx, ver_name);
-            }
-        }
         Dialog::Citations(mut entry) => {
             citations_dialog(app, ctx, &mut open, &mut entry);
             if open && matches!(app.dialog, Dialog::Citations(_)) {
@@ -869,6 +880,65 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 app.dialog = Dialog::Rename(name);
             }
         }
+        Dialog::Print(mut cfg) => {
+            print_dialog(app, ctx, &mut open, &mut cfg);
+            if open && matches!(app.dialog, Dialog::Print(_)) {
+                app.dialog = Dialog::Print(cfg);
+            }
+        }
+        Dialog::ImageProps(img_id) => {
+            image_props_dialog(app, ctx, &mut open, img_id, now);
+        }
+        Dialog::InsertTable {
+            mut rows,
+            mut cols,
+            mut header_shading,
+        } => {
+            insert_table_dialog(app, ctx, &mut open, &mut rows, &mut cols, &mut header_shading);
+            if open && matches!(app.dialog, Dialog::InsertTable { .. }) {
+                app.dialog = Dialog::InsertTable {
+                    rows,
+                    cols,
+                    header_shading,
+                };
+            }
+        }
+        Dialog::TableMath {
+            table_id,
+            row,
+            col,
+            mut op,
+            mut use_above,
+            mut use_left,
+            mut chosen,
+            mut keep_sig_figs,
+        } => {
+            table_math_dialog(
+                app,
+                ctx,
+                &mut open,
+                table_id,
+                row,
+                col,
+                &mut op,
+                &mut use_above,
+                &mut use_left,
+                &mut chosen,
+                &mut keep_sig_figs,
+            );
+            if open && matches!(app.dialog, Dialog::TableMath { .. }) {
+                app.dialog = Dialog::TableMath {
+                    table_id,
+                    row,
+                    col,
+                    op,
+                    use_above,
+                    use_left,
+                    chosen,
+                    keep_sig_figs,
+                };
+            }
+        }
     }
     if !open {
         app.dialog = Dialog::None;
@@ -879,48 +949,98 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, query: &mut String) {
     let kp = app.cfg.shortcut_preset;
     let items: &[(Icon, &str, &str, Action)] = &[
+        // File
         (Icon::New, "File > New document", "Ctrl+N", Action::New),
+        (Icon::Open, "File > Open…", "Ctrl+O", Action::Open),
         (Icon::CopyDoc, "File > Make a copy", "", Action::MakeCopy),
         (Icon::Save, "File > Save", "Ctrl+S", Action::Save),
         (Icon::Save, "File > Save As", kp.save_as(), Action::SaveAs),
-        (Icon::Pdf, "File > Download as PDF (.pdf)", "Ctrl+P", Action::ExportPdf),
+        (Icon::Pdf, "File > Download as PDF (.pdf)", "", Action::ExportPdf),
         (Icon::Save, "File > Download as Google Docs (.gdoc)", "", Action::ExportGdoc),
         (Icon::Save, "File > Download as Microsoft Word (.docx)", "", Action::ExportDocx),
+        (Icon::Save, "File > Download as Rich Text (.rtf)", "", Action::ExportRtf),
+        (Icon::Save, "File > Download as Plain Text (.txt)", "", Action::ExportTxt),
         (Icon::Save, "File > Download as Markdown (.md)", "", Action::ExportMd),
         (Icon::Save, "File > Download as Web Page (.html)", "", Action::ExportHtml),
-        (Icon::History, "File > Version history", "Ctrl+Alt+Shift+H", Action::Dialog(Dialog::VersionHistory(0, String::new()))),
-        (Icon::Pageless, "File > Page setup (Pages / Pageless)", "", Action::Dialog(Dialog::PageSetup)),
+        (Icon::EditMode, "File > Rename document…", "", Action::Dialog(Dialog::Rename(app.tab_ref().title()))),
+        (Icon::EditMode, "File > Version history > Name current version…", "", Action::OpenNameVersion),
+        (Icon::History, "File > Version history > See version history", "Ctrl+Alt+Shift+H", Action::ToggleHistory),
         (Icon::PageSetup, "File > Document details", "", Action::Dialog(Dialog::DocProps)),
+        (Icon::Pageless, "File > Page setup (Pages / Pageless)", "", Action::Dialog(Dialog::PageSetup)),
+        (Icon::Print, "File > Print…", "Ctrl+P", Action::Print),
+        (Icon::Star, "File > Star / unstar document", "", Action::ToggleStar),
+        // Edit
         (Icon::Undo, "Edit > Undo", "Ctrl+Z", Action::Undo),
         (Icon::Redo, "Edit > Redo", "Ctrl+Y", Action::Redo),
+        (Icon::Cut, "Edit > Cut", "Ctrl+X", Action::Cut),
+        (Icon::Copy, "Edit > Copy", "Ctrl+C", Action::Copy),
+        (Icon::Paste, "Edit > Paste", "Ctrl+V", Action::Paste),
         (Icon::Paste, "Edit > Paste without formatting", kp.paste_plain(), Action::PastePlain),
+        (Icon::EditMode, "Edit > Select all", "Ctrl+A", Action::SelectAll),
+        (Icon::CopyDoc, "Edit > Duplicate paragraph", "Ctrl+D", Action::DuplicatePara),
+        (Icon::Find, "Edit > Find", "Ctrl+F", Action::Dialog(Dialog::Find(false))),
         (Icon::Find, "Edit > Find and replace", kp.replace(), Action::Dialog(Dialog::Find(true))),
+        (Icon::PageBreak, "Edit > Go to page…", "Ctrl+G", Action::Dialog(Dialog::GoTo(1))),
+        // View
         (Icon::EditMode, "View > Mode: Editing", "", Action::SetMode(DocMode::Editing)),
         (Icon::SuggestMode, "View > Mode: Suggesting", "", Action::SetMode(DocMode::Suggesting)),
         (Icon::ViewMode, "View > Mode: Viewing", "", Action::SetMode(DocMode::Viewing)),
         (Icon::NavPane, "View > Show document outline", "", Action::ToggleNav),
         (Icon::Comment, "View > Show comments & suggestions", "", Action::ToggleComments),
-        (Icon::Pageless, "View > Toggle Pageless mode", "", Action::TogglePageless),
+        (Icon::Pageless, "View > Toggle Pageless / Pages mode", "", Action::TogglePageless),
+        (Icon::ZoomIn, "View > Zoom: Fit page width", "", Action::ZoomMode(ZoomMode::PageWidth)),
+        (Icon::ZoomIn, "View > Zoom: Fit margin width", "", Action::ZoomMode(ZoomMode::MarginWidth)),
+        (Icon::ZoomOut, "View > Zoom: Full page", "", Action::ZoomMode(ZoomMode::FullPage)),
+        (Icon::ZoomIn, "View > Zoom in", "Ctrl+=", Action::ZoomIn),
+        (Icon::ZoomOut, "View > Zoom out", "Ctrl+-", Action::ZoomOut),
         (Icon::ChevronUp, "View > Compact mode (hide menus)", "Ctrl+Shift+F", Action::ToggleCompact),
+        (Icon::Moon, "View > Toggle Dark / Light theme", "", Action::ToggleDark),
+        (Icon::DocsLogo, "View > Icon design sheet", "", Action::Dialog(Dialog::DesignSheet)),
+        // Insert
+        (Icon::Image, "Insert > Image from file…", "", Action::InsertImage),
+        (Icon::Table, "Insert > Table… (custom rows & columns)", "", Action::Dialog(Dialog::InsertTable { rows: 3, cols: 3, header_shading: None })),
         (Icon::Table, "Insert > Table (2×2)", "", Action::InsertBuildingBlock("table_2x2")),
         (Icon::Table, "Insert > Table (3×3)", "", Action::InsertBuildingBlock("table_3x3")),
+        (Icon::Table, "Insert > Table > Calculate Sum / Math…", "", Action::OpenTableMath),
+        (Icon::Table, "Insert > Table > Select row", "", Action::TableSelectRow),
+        (Icon::Table, "Insert > Table > Select column", "", Action::TableSelectCol),
+        (Icon::Table, "Insert > Table > Auto-fit column width", "", Action::TableAutoFitCol),
+        (Icon::Table, "Insert > Table > Auto-fit row height", "", Action::TableAutoFitRow),
+        (Icon::Table, "Insert > Table > Toggle text wrap", "", Action::TableToggleWrap),
+        (Icon::Table, "Insert > Table > Merge right", "", Action::TableMergeRight),
+        (Icon::Table, "Insert > Table > Merge row", "", Action::TableMergeRow),
+        (Icon::Table, "Insert > Table > Split cell", "", Action::TableSplitCell),
+        (Icon::Table, "Insert > Table > Insert row above", "", Action::TableInsertRow { above: true }),
+        (Icon::Table, "Insert > Table > Insert row below", "", Action::TableInsertRow { above: false }),
+        (Icon::Table, "Insert > Table > Insert column left", "", Action::TableInsertCol { left: true }),
+        (Icon::Table, "Insert > Table > Insert column right", "", Action::TableInsertCol { left: false }),
+        (Icon::Table, "Insert > Table > Delete row", "", Action::TableDeleteRow),
+        (Icon::Table, "Insert > Table > Delete column", "", Action::TableDeleteCol),
         (Icon::BuildingBlock, "Insert > Building block: Meeting notes", "", Action::InsertBuildingBlock("meeting")),
         (Icon::BuildingBlock, "Insert > Building block: Email draft", "", Action::InsertBuildingBlock("email")),
         (Icon::BuildingBlock, "Insert > Building block: Project roadmap", "", Action::InsertBuildingBlock("roadmap")),
         (Icon::BuildingBlock, "Insert > Building block: Launch checklist", "", Action::InsertBuildingBlock("checklist")),
         (Icon::BuildingBlock, "Insert > Building block: Code block", "", Action::InsertBuildingBlock("code")),
         (Icon::SmartChip, "Insert > Smart chip: Today's date (@today)", "", Action::InsertSmartChip("today")),
+        (Icon::SmartChip, "Insert > Smart chip: Tomorrow's date (@tomorrow)", "", Action::InsertSmartChip("tomorrow")),
+        (Icon::SmartChip, "Insert > Smart chip: Person (@person)", "", Action::InsertSmartChip("person")),
+        (Icon::SmartChip, "Insert > Smart chip: Status — Not started", "", Action::InsertSmartChip("status_not_started")),
         (Icon::SmartChip, "Insert > Smart chip: Status — In progress", "", Action::InsertSmartChip("status_in_progress")),
+        (Icon::SmartChip, "Insert > Smart chip: Status — In review", "", Action::InsertSmartChip("status_review")),
         (Icon::SmartChip, "Insert > Smart chip: Status — Approved", "", Action::InsertSmartChip("status_approved")),
+        (Icon::SmartChip, "Insert > Smart chip: Priority — High", "", Action::InsertSmartChip("priority_high")),
+        (Icon::SmartChip, "Insert > Smart chip: Timer", "", Action::InsertSmartChip("timer")),
         (Icon::HorizontalRule, "Insert > Horizontal line", "", Action::HorizontalRule),
         (Icon::Footnote, "Insert > Footnote", "Ctrl+Alt+F", Action::InsertFootnote),
         (Icon::Symbol, "Insert > Emoji (System Library)", "", Action::SystemEmojiPicker),
         (Icon::Symbol, "Insert > Special characters & emoji", "", Action::Dialog(Dialog::Symbol)),
+        (Icon::SmartChip, "Insert > Date & time…", "", Action::Dialog(Dialog::DateTime)),
         (Icon::PageBreak, "Insert > Page break", "Ctrl+Enter", Action::PageBreak),
         (Icon::Link, "Insert > Link", "Ctrl+K", Action::Dialog(Dialog::Link { text: String::new(), url: String::new() })),
         (Icon::Comment, "Insert > Comment", "Ctrl+Alt+M", Action::Dialog(Dialog::Comment(String::new()))),
         (Icon::Bookmark, "Insert > Bookmark", "", Action::Dialog(Dialog::Bookmark(String::new()))),
         (Icon::NavPane, "Insert > Table of contents", "", Action::InsertToc),
+        // Format
         (Icon::Bold, "Format > Text > Bold", "Ctrl+B", Action::Bold),
         (Icon::Italic, "Format > Text > Italic", "Ctrl+I", Action::Italic),
         (Icon::Underline, "Format > Text > Underline", "Ctrl+U", Action::Underline),
@@ -932,6 +1052,8 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         (Icon::TextColor, "Format > Text > Capitalization: UPPERCASE", "", Action::Case(CaseChange::Upper)),
         (Icon::TextColor, "Format > Text > Capitalization: lowercase", "", Action::Case(CaseChange::Lower)),
         (Icon::TextColor, "Format > Text > Capitalization: Title Case", "", Action::Case(CaseChange::Title)),
+        (Icon::TextColor, "Format > Text > Capitalization: Sentence case", "", Action::Case(CaseChange::Sentence)),
+        (Icon::TextColor, "Format > Text > Font…", "", Action::Dialog(Dialog::Font)),
         (Icon::EditMode, "Format > Paragraph styles > Normal text", kp.style_normal(), Action::Style(0)),
         (Icon::EditMode, "Format > Paragraph styles > Title", "", Action::Style(2)),
         (Icon::EditMode, "Format > Paragraph styles > Subtitle", "", Action::Style(3)),
@@ -943,15 +1065,33 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         (Icon::AlignCenter, "Format > Align & indent > Center", kp.align_center(), Action::Align(Align::Center)),
         (Icon::AlignRight, "Format > Align & indent > Right", kp.align_right(), Action::Align(Align::Right)),
         (Icon::AlignJustify, "Format > Align & indent > Justified", kp.align_justify(), Action::Align(Align::Justify)),
+        (Icon::Indent, "Format > Align & indent > Increase indent", "Ctrl+]", Action::Indent(1)),
+        (Icon::Outdent, "Format > Align & indent > Decrease indent", "Ctrl+[", Action::Indent(-1)),
+        (Icon::LineSpacing, "Format > Line & paragraph spacing…", "", Action::Dialog(Dialog::Paragraph)),
+        (Icon::LineSpacing, "Format > Line spacing: Single (1.0)", "", Action::LineSpacing(1.0)),
+        (Icon::LineSpacing, "Format > Line spacing: 1.15", "", Action::LineSpacing(1.15)),
+        (Icon::LineSpacing, "Format > Line spacing: 1.5", "", Action::LineSpacing(1.5)),
+        (Icon::LineSpacing, "Format > Line spacing: Double (2.0)", "", Action::LineSpacing(2.0)),
         (Icon::Checklist, "Format > Bullets & numbering > Checklist", kp.checklist(), Action::List(ListKind::Checklist)),
         (Icon::Bullets, "Format > Bullets & numbering > Bulleted list", kp.bullet_list(), Action::List(ListKind::Bullet)),
         (Icon::Numbers, "Format > Bullets & numbering > Numbered list", kp.number_list(), Action::List(ListKind::Number)),
+        (Icon::PageSetup, "Format > Page orientation (Portrait / Landscape)", "", Action::PageEdit(PageEdit::Swap)),
+        (Icon::Painter, "Format > Paint format (Format painter)", "Ctrl+Alt+C", Action::FormatPainter),
         (Icon::Clear, "Format > Clear formatting", kp.clear_format(), Action::ClearFormat),
+        // Tools
         (Icon::Spell, "Tools > Spelling and grammar check", kp.spellcheck(), Action::Dialog(Dialog::Spell(0))),
+        (Icon::Spell, "Tools > Toggle spellcheck as you type", "", Action::ToggleSpell),
         (Icon::WordCount, "Tools > Word count", kp.word_count(), Action::Dialog(Dialog::WordCount)),
+        (Icon::WordCount, "Tools > Display live word count while typing", "", Action::ToggleLiveWordCount),
         (Icon::Citation, "Tools > Citations & Bibliography", "", Action::Dialog(Dialog::Citations(CitationEntry::default()))),
         (Icon::Dictionary, "Tools > Dictionary / Define word", kp.dictionary(), Action::Dialog(Dialog::Dictionary)),
+        (Icon::EditMode, "Tools > SmartCorrect / Auto-substitutions…", "", Action::Dialog(Dialog::SmartCorrect(String::new(), String::new()))),
         (Icon::PageSetup, "Tools > Preferences", "", Action::Dialog(Dialog::Prefs)),
+        // Window & Help
+        (Icon::New, "Window > Next document tab", "Ctrl+Tab", Action::NextTab),
+        (Icon::Close, "Window > Close all tabs", "", Action::CloseAll),
+        (Icon::Shortcuts, "Help > Keyboard shortcuts", "Ctrl+/", Action::Dialog(Dialog::Shortcuts)),
+        (Icon::About, "Help > About Scribe Pro", "", Action::Dialog(Dialog::About)),
     ];
 
     let mut trigger: Option<Action> = None;
@@ -971,7 +1111,7 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         }
         ui.add_space(4.0);
         egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-            for (ic, label, sc, act) in filtered.into_iter().take(25) {
+            for (ic, label, sc, act) in filtered.into_iter().take(40) {
                 let (rect, resp) = ui.allocate_exact_size(vec2(410.0, 26.0), egui::Sense::click());
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 4.0, app.theme.hover);
@@ -1025,6 +1165,7 @@ fn at_menu_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, query: &m
         (Icon::BuildingBlock, "Project roadmap", "Building Block", Action::InsertBuildingBlock("roadmap")),
         (Icon::BuildingBlock, "Launch checklist", "Building Block", Action::InsertBuildingBlock("checklist")),
         (Icon::BuildingBlock, "Code block", "Building Block", Action::InsertBuildingBlock("code")),
+        (Icon::Image, "Image from file…", "Insert", Action::InsertImage),
         (Icon::Table, "Table (2×2)", "Insert", Action::InsertBuildingBlock("table_2x2")),
         (Icon::Table, "Table (3×3)", "Insert", Action::InsertBuildingBlock("table_3x3")),
         (Icon::Checklist, "Checklist", "Format", Action::List(ListKind::Checklist)),
@@ -1176,77 +1317,6 @@ fn link_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, text: &mut S
         let t_str = text.trim().to_string();
         *open = false;
         app.act(Action::InsertLink { text: t_str, url: u });
-    }
-}
-
-fn version_history_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, sel_idx: &mut usize, ver_name: &mut String, now: f64) {
-    let mut save_ver = false;
-    let mut restore_idx: Option<usize> = None;
-    let versions = app.tab_ref().versions.clone();
-    window("Version history").open(open).show(ctx, |ui| {
-        ui.set_min_width(520.0);
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(ver_name).desired_width(240.0).hint_text("Name current version (e.g. Draft 1)"));
-            if ui.button("Save named version").clicked() {
-                save_ver = true;
-            }
-        });
-        ui.separator();
-        if versions.is_empty() {
-            ui.label(RichText::new("No named versions saved yet. Click 'Save named version' above or save the document (Ctrl+S) to record a snapshot.").weak());
-        } else {
-            let idx = (*sel_idx).min(versions.len() - 1);
-            *sel_idx = idx;
-            ui.columns(2, |cols| {
-                cols[0].label(RichText::new("Saved versions").strong());
-                egui::ScrollArea::vertical().id_salt("vh_list").max_height(260.0).show(&mut cols[0], |ui| {
-                    for (i, v) in versions.iter().enumerate().rev() {
-                        let lbl = format!("{} — {} ({} words)", v.name, v.timestamp, v.words);
-                        if ui.selectable_label(i == *sel_idx, lbl).clicked() {
-                            *sel_idx = i;
-                        }
-                    }
-                });
-                let v = &versions[*sel_idx];
-                cols[1].label(RichText::new(format!("Preview: {} ({})", v.name, v.timestamp)).strong());
-                let preview = from_json(&v.snapshot_json).map(|d| d.plain_text()).unwrap_or_default();
-                egui::ScrollArea::vertical().id_salt("vh_prev").max_height(220.0).show(&mut cols[1], |ui| {
-                    ui.label(if preview.is_empty() { "(Empty document)" } else { &preview });
-                });
-                cols[1].add_space(6.0);
-                if cols[1].button("Restore this version").clicked() {
-                    restore_idx = Some(*sel_idx);
-                }
-            });
-        }
-    });
-    if save_ver {
-        let name = if ver_name.trim().is_empty() {
-            format!("Version {}", app.tab_ref().versions.len() + 1)
-        } else {
-            ver_name.trim().to_string()
-        };
-        ver_name.clear();
-        let t = app.tab();
-        let (_, words) = t.doc.counts(None);
-        let snap = to_json(&t.doc);
-        let ts = chrono::Local::now().format("%b %-d, %-I:%M %p").to_string();
-        t.versions.push(DocVersion { name: name.clone(), timestamp: ts, words, snapshot_json: snap });
-        *sel_idx = t.versions.len().saturating_sub(1);
-        app.toast(format!("Saved version “{name}”"));
-    }
-    if let Some(i) = restore_idx {
-        if let Some(v) = versions.get(i) {
-            if let Ok(restored) = from_json(&v.snapshot_json) {
-                let t = app.tab();
-                t.checkpoint(EditKind::Other, now);
-                t.doc = restored;
-                t.set_caret(Pos::new(0, 0), false);
-                t.changed();
-                app.toast(format!("Restored version “{}”", v.name));
-                *open = false;
-            }
-        }
     }
 }
 
@@ -1406,6 +1476,126 @@ fn dictionary_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, now: f
         let e = t.doc.insert_text(a, &rep, style);
         t.set_caret(e, false);
         t.changed();
+        *open = false;
+    }
+}
+
+fn print_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, cfg: &mut crate::print::PrintJobConfig) {
+    let mut do_print = false;
+    let mut do_preview = false;
+    let mut do_save_pdf = false;
+    let mut cancel = false;
+
+    window("Print Document (Ctrl+P)").open(open).show(ctx, |ui| {
+        ui.set_min_width(430.0);
+        egui::Grid::new("print_cfg_grid").num_columns(2).spacing(vec2(14.0, 8.0)).show(ui, |ui| {
+            ui.label(RichText::new("Destination Printer").strong());
+            ui.horizontal(|ui| {
+                let current_name = cfg
+                    .printers
+                    .get(cfg.selected_printer)
+                    .cloned()
+                    .unwrap_or_else(|| "Default System Printer".into());
+                egui::ComboBox::from_id_salt("print_dest_combo")
+                    .selected_text(current_name)
+                    .width(230.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in cfg.printers.iter().enumerate() {
+                            ui.selectable_value(&mut cfg.selected_printer, i, name);
+                        }
+                    });
+                if ui.button("Refresh").on_hover_text("Re-scan native system printers").clicked() {
+                    let refreshed = crate::print::PrintJobConfig::discover(cfg.total_pages);
+                    cfg.printers = refreshed.printers;
+                    cfg.selected_printer = refreshed.selected_printer;
+                }
+            });
+            ui.end_row();
+
+            ui.label(RichText::new("Pages").strong());
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut cfg.all_pages, true, format!("All ({})", cfg.total_pages));
+                ui.radio_value(&mut cfg.all_pages, false, "Range:");
+                ui.add_enabled(
+                    !cfg.all_pages,
+                    egui::DragValue::new(&mut cfg.from_page).range(1..=cfg.total_pages.max(1)).speed(0.1),
+                );
+                ui.label("to");
+                ui.add_enabled(
+                    !cfg.all_pages,
+                    egui::DragValue::new(&mut cfg.to_page).range(1..=cfg.total_pages.max(1)).speed(0.1),
+                );
+            });
+            ui.end_row();
+
+            ui.label(RichText::new("Copies").strong());
+            ui.add(egui::DragValue::new(&mut cfg.copies).range(1..=99).speed(0.1));
+            ui.end_row();
+
+            ui.label(RichText::new("Color Mode").strong());
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut cfg.color, true, "Color (Calibrated sRGB)");
+                ui.selectable_value(&mut cfg.color, false, "Black & White");
+            });
+            ui.end_row();
+
+            ui.label(RichText::new("Two-Sided").strong());
+            egui::ComboBox::from_id_salt("print_duplex_combo")
+                .selected_text(cfg.duplex.label())
+                .width(230.0)
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        crate::print::DuplexMode::OneSided,
+                        crate::print::DuplexMode::LongEdge,
+                        crate::print::DuplexMode::ShortEdge,
+                    ] {
+                        ui.selectable_value(&mut cfg.duplex, mode, mode.label());
+                    }
+                });
+            ui.end_row();
+        });
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("  Print  ").strong()).clicked() {
+                do_print = true;
+            }
+            if ui.button("System Preview…").clicked() {
+                do_preview = true;
+            }
+            if ui.button("Save as PDF…").clicked() {
+                do_save_pdf = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    if do_print {
+        let base = app.tab_ref().name.split('.').next().unwrap_or("Document").to_string();
+        let doc = app.tab_ref().doc.clone();
+        match crate::print::submit_cups_print_job(ctx, &doc, &app.book, &base, cfg) {
+            crate::print::PrintOutcome::Printed(msg) => app.toast(msg),
+            crate::print::PrintOutcome::Cancelled => {}
+            crate::print::PrintOutcome::Error(err) => app.toast(err),
+        }
+        *open = false;
+    } else if do_preview {
+        let base = app.tab_ref().name.split('.').next().unwrap_or("Document").to_string();
+        let doc = app.tab_ref().doc.clone();
+        match crate::print::open_system_print_preview(ctx, &doc, &app.book, &base) {
+            crate::print::PrintOutcome::Printed(msg) => app.toast(msg),
+            crate::print::PrintOutcome::Cancelled => {}
+            crate::print::PrintOutcome::Error(err) => app.toast(err),
+        }
+        *open = false;
+    } else if do_save_pdf {
+        app.act(Action::ExportPdf);
+        *open = false;
+    } else if cancel {
         *open = false;
     }
 }
@@ -1917,4 +2107,517 @@ fn design_sheet_dialog(ctx: &egui::Context, open: &mut bool) {
                 }
             });
         });
+}
+
+fn image_props_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, img_id: u64, now: f64) {
+    let Some(img_snapshot) = app.tab_ref().doc.image(img_id).cloned() else {
+        *open = false;
+        return;
+    };
+    let para_idx = app
+        .tab_ref()
+        .doc
+        .paras
+        .iter()
+        .position(|p| p.fmt.image_id == img_id);
+    let cur_align = para_idx
+        .map_or(Align::Center, |pi| app.tab_ref().doc.paras[pi].fmt.align);
+    let max_w_in = {
+        let pg = &app.tab_ref().doc.page;
+        (pg.width - pg.margin_left - pg.margin_right).max(1.0)
+    };
+    let nat_aspect = img_snapshot.aspect_ratio();
+
+    let mut w_in = img_snapshot.width_in;
+    let mut h_in = img_snapshot.height_in;
+    let mut caption = img_snapshot.caption.clone();
+    let mut align = cur_align;
+    let mut replace_clicked = false;
+    let mut delete_clicked = false;
+    let mut done_clicked = false;
+
+    window("Image Size & Caption").open(open).show(ctx, |ui| {
+        ui.set_min_width(400.0);
+        ui.horizontal(|ui| {
+            let (ir, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
+            draw_icon(ui.painter(), ir, Icon::Image, app.theme.icon, app.theme.accent);
+            ui.label(RichText::new(&img_snapshot.name).strong());
+            ui.label(
+                RichText::new(format!(
+                    "({} × {} px)",
+                    img_snapshot.natural_size[0], img_snapshot.natural_size[1]
+                ))
+                .weak()
+                .small(),
+            );
+        });
+        ui.add_space(6.0);
+
+        ui.label(RichText::new("Caption").strong());
+        let cap_resp = ui.add(
+            egui::TextEdit::singleline(&mut caption)
+                .desired_width(385.0)
+                .hint_text("Add a caption below the image (e.g. Figure 1: Architecture overview)…"),
+        );
+        if cap_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            done_clicked = true;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Quick prefix:").weak().small());
+            if ui.small_button("Figure 1: ").clicked() && !caption.starts_with("Figure ") {
+                caption = format!("Figure 1: {caption}");
+            }
+            if ui.small_button("Photo: ").clicked() && !caption.starts_with("Photo: ") {
+                caption = format!("Photo: {caption}");
+            }
+            if !caption.is_empty() && ui.small_button("Clear caption").clicked() {
+                caption.clear();
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label(RichText::new("Dimensions & Scale").strong());
+        ui.horizontal(|ui| {
+            ui.label("Width:");
+            let w_changed = ui
+                .add(
+                    egui::DragValue::new(&mut w_in)
+                        .speed(0.05)
+                        .range(0.5..=max_w_in)
+                        .fixed_decimals(2)
+                        .suffix(" in"),
+                )
+                .changed();
+            if w_changed {
+                h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+            }
+            ui.add_space(10.0);
+            ui.label("Height:");
+            let h_changed = ui
+                .add(
+                    egui::DragValue::new(&mut h_in)
+                        .speed(0.05)
+                        .range(0.4..=20.0)
+                        .fixed_decimals(2)
+                        .suffix(" in"),
+                )
+                .changed();
+            if h_changed {
+                w_in = (h_in * nat_aspect).clamp(0.5, max_w_in);
+            }
+            if ui.small_button("1:1 Ratio").on_hover_text("Reset height to match original aspect ratio").clicked() {
+                h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Page width preset:").weak().small());
+            for (lbl, frac) in [("25%", 0.25_f32), ("50%", 0.50), ("75%", 0.75), ("100%", 1.0)] {
+                if ui.small_button(lbl).clicked() {
+                    w_in = (max_w_in * frac).clamp(0.5, max_w_in);
+                    h_in = (w_in / nat_aspect).clamp(0.4, 20.0);
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Alignment:").strong());
+            ui.selectable_value(&mut align, Align::Left, "Left");
+            ui.selectable_value(&mut align, Align::Center, "Center");
+            ui.selectable_value(&mut align, Align::Right, "Right");
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Replace from file…").clicked() {
+                replace_clicked = true;
+            }
+            if ui.button(RichText::new("Remove image").color(egui::Color32::from_rgb(220, 38, 38))).clicked() {
+                delete_clicked = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Done").clicked() {
+                    done_clicked = true;
+                }
+            });
+        });
+    });
+
+    if (w_in - img_snapshot.width_in).abs() > 0.002
+        || (h_in - img_snapshot.height_in).abs() > 0.002
+        || caption != img_snapshot.caption
+        || align != cur_align
+    {
+        let t = app.tab();
+        t.checkpoint(EditKind::Other, now);
+        if let Some(img) = t.doc.image_mut(img_id) {
+            img.width_in = w_in;
+            img.height_in = h_in;
+            img.caption = caption;
+        }
+        if let Some(pi) = para_idx {
+            t.doc.paras[pi].fmt.align = align;
+        }
+        t.changed();
+        t.scroll_to_caret = false;
+    }
+
+    if replace_clicked {
+        app.act(Action::ReplaceImage(img_id));
+    } else if delete_clicked {
+        app.tab().remove_image(img_id, now);
+        *open = false;
+    } else if done_clicked {
+        *open = false;
+    }
+}
+
+pub const TABLE_SHADING_SWATCHES: &[(&str, Option<[u8; 3]>)] = &[
+    ("None", None),
+    ("Pale Yellow", Some([255, 255, 204])),
+    ("Teal Banner", Some([60, 127, 139])),
+    ("Gold Banner", Some([193, 134, 38])),
+    ("Crimson Banner", Some([191, 47, 19])),
+    ("Soft Blue", Some([219, 234, 254])),
+    ("Soft Green", Some([220, 252, 231])),
+    ("Soft Rose", Some([255, 228, 230])),
+    ("Soft Slate", Some([241, 245, 249])),
+];
+
+fn insert_table_dialog(
+    app: &mut App,
+    ctx: &egui::Context,
+    open: &mut bool,
+    rows: &mut usize,
+    cols: &mut usize,
+    header_shading: &mut Option<[u8; 3]>,
+) {
+    let mut insert_clicked = false;
+    let mut cancel_clicked = false;
+    window("Insert Table").open(open).show(ctx, |ui| {
+        ui.set_min_width(380.0);
+        ui.label(RichText::new("Dimensions").strong());
+        ui.horizontal(|ui| {
+            ui.label("Columns:");
+            ui.add(egui::DragValue::new(cols).range(1..=12).speed(0.1));
+            ui.add_space(14.0);
+            ui.label("Rows:");
+            ui.add(egui::DragValue::new(rows).range(1..=64).speed(0.2));
+        });
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("Quick Grid Picker (click a cell to set size):").weak().small());
+        let max_preview_r = 6usize;
+        let max_preview_c = 8usize;
+        egui::Grid::new("tbl-grid-picker").spacing(vec2(4.0, 4.0)).show(ui, |ui| {
+            for r in 1..=max_preview_r {
+                for c in 1..=max_preview_c {
+                    let active = r <= *rows && c <= *cols;
+                    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 18.0), egui::Sense::click());
+                    let fill = if active {
+                        if r == 1 {
+                            header_shading.map_or(app.theme.accent.gamma_multiply(0.35), |rgb| {
+                                egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+                            })
+                        } else {
+                            app.theme.accent_soft
+                        }
+                    } else {
+                        app.theme.surface_subtle
+                    };
+                    let stroke_col = if active || resp.hovered() { app.theme.accent } else { app.theme.border };
+                    ui.painter().rect_filled(rect, 3.0, fill);
+                    ui.painter()
+                        .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke_col), egui::StrokeKind::Inside);
+                    if resp.on_hover_text(format!("{c} × {r} table")).clicked() {
+                        *rows = r;
+                        *cols = c;
+                    }
+                }
+                ui.end_row();
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(RichText::new("Header Row Shading (Optional)").strong());
+        ui.horizontal_wrapped(|ui| {
+            for &(name, rgb_opt) in TABLE_SHADING_SWATCHES {
+                let selected = *header_shading == rgb_opt;
+                let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::click());
+                let fill = rgb_opt.map_or(egui::Color32::WHITE, |c| egui::Color32::from_rgb(c[0], c[1], c[2]));
+                ui.painter().rect_filled(rect.shrink(2.0), 5.0, fill);
+                if rgb_opt.is_none() {
+                    ui.painter().line_segment(
+                        [rect.shrink(5.0).left_bottom(), rect.shrink(5.0).right_top()],
+                        egui::Stroke::new(1.3, egui::Color32::from_rgb(220, 38, 38)),
+                    );
+                }
+                let st = if selected {
+                    egui::Stroke::new(2.0, app.theme.accent)
+                } else {
+                    egui::Stroke::new(1.0, app.theme.border)
+                };
+                ui.painter().rect_stroke(rect.shrink(2.0), 5.0, st, egui::StrokeKind::Inside);
+                if resp.on_hover_text(name).clicked() {
+                    *header_shading = rgb_opt;
+                }
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new(format!("  Insert {} × {} Table  ", *cols, *rows)).strong())
+                .clicked()
+            {
+                insert_clicked = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel_clicked = true;
+            }
+        });
+    });
+
+    if insert_clicked {
+        let r = *rows;
+        let c = *cols;
+        let shd = *header_shading;
+        *open = false;
+        app.act(Action::InsertTable {
+            rows: r,
+            cols: c,
+            header_shading: shd,
+        });
+    } else if cancel_clicked {
+        *open = false;
+    }
+}
+
+#[expect(clippy::too_many_arguments, reason = "Table math dialog binds operation, range mode, chosen cells, and sig-fig option")]
+fn table_math_dialog(
+    app: &mut App,
+    ctx: &egui::Context,
+    open: &mut bool,
+    table_id: u32,
+    target_row: usize,
+    target_col: usize,
+    op: &mut TableMathOp,
+    use_above: &mut bool,
+    use_left: &mut bool,
+    chosen: &mut Vec<(usize, usize)>,
+    keep_sig_figs: &mut bool,
+) {
+    let Some(tbl_snap) = app.tab_ref().doc.table(table_id).cloned() else {
+        *open = false;
+        return;
+    };
+    let target_label = cell_coord_label(target_row, target_col);
+    let mut apply_formula: Option<Option<String>> = None;
+    let mut cancel_clicked = false;
+
+    let args_part = if *use_above {
+        "ABOVE".to_string()
+    } else if *use_left {
+        "LEFT".to_string()
+    } else {
+        chosen
+            .iter()
+            .map(|&(r, c)| cell_coord_label(r, c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let suffix = if *keep_sig_figs { "" } else { ";RAW" };
+    let built_formula = if args_part.is_empty() {
+        String::new()
+    } else {
+        format!("={}({}{})", op.name(), args_part, suffix)
+    };
+    let preview_val = if built_formula.is_empty() {
+        "—".to_string()
+    } else {
+        app.tab_ref()
+            .doc
+            .preview_table_formula(table_id, target_row, target_col, &built_formula)
+            .unwrap_or_else(|| "0".to_string())
+    };
+
+    window(&format!("Table Cell Math — Cell {target_label}"))
+        .open(open)
+        .show(ctx, |ui| {
+            ui.set_min_width(440.0);
+            ui.label(
+                RichText::new("Calculate Sum (Total), Subtotal, Average, or Median directly in your document table.")
+                    .weak()
+                    .small(),
+            );
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Calculation:").strong());
+                for candidate in [
+                    TableMathOp::Sum,
+                    TableMathOp::Subtotal,
+                    TableMathOp::Average,
+                    TableMathOp::Median,
+                ] {
+                    if ui.selectable_label(*op == candidate, candidate.label()).clicked() {
+                        *op = candidate;
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Input Cells:").strong());
+                if ui
+                    .selectable_label(*use_above, "Column Above (ABOVE)")
+                    .on_hover_text("Use numeric cells above this cell in the same column")
+                    .clicked()
+                {
+                    *use_above = true;
+                    *use_left = false;
+                }
+                if ui
+                    .selectable_label(*use_left, "Row to Left (LEFT)")
+                    .on_hover_text("Use numeric cells to the left of this cell in the same row")
+                    .clicked()
+                {
+                    *use_left = true;
+                    *use_above = false;
+                }
+                if ui
+                    .selectable_label(!*use_above && !*use_left, "Chosen Cells (Pick Below)")
+                    .on_hover_text("Click any combination of cells in the grid below")
+                    .clicked()
+                {
+                    if *use_above {
+                        chosen.clear();
+                        for r in 0..target_row {
+                            chosen.push((r, target_col));
+                        }
+                    } else if *use_left {
+                        chosen.clear();
+                        for c in 0..target_col {
+                            chosen.push((target_row, c));
+                        }
+                    }
+                    *use_above = false;
+                    *use_left = false;
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Click cells in the table preview below to include/exclude them from the calculation:")
+                    .weak()
+                    .small(),
+            );
+            egui::ScrollArea::both()
+                .id_salt("tbl-math-cell-picker")
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("tbl-math-grid").spacing(vec2(6.0, 4.0)).show(ui, |ui| {
+                        for (r_idx, row_spec) in tbl_snap.rows.iter().enumerate() {
+                            for (c_idx, _cell_spec) in row_spec.cells.iter().enumerate() {
+                                let coord = cell_coord_label(r_idx, c_idx);
+                                let raw_txt = app.tab_ref().doc.cell_text(table_id, r_idx, c_idx);
+                                let short_txt: String = raw_txt.trim().chars().take(12).collect();
+                                let display = if (r_idx, c_idx) == (target_row, target_col) {
+                                    format!("🎯 {coord} (Target)")
+                                } else if short_txt.is_empty() {
+                                    format!("{coord}: —")
+                                } else {
+                                    format!("{coord}: {short_txt}")
+                                };
+                                let is_target = (r_idx, c_idx) == (target_row, target_col);
+                                let is_selected = if is_target {
+                                    false
+                                } else if *use_above {
+                                    c_idx == target_col && r_idx < target_row
+                                } else if *use_left {
+                                    r_idx == target_row && c_idx < target_col
+                                } else {
+                                    chosen.contains(&(r_idx, c_idx))
+                                };
+                                let btn = ui.add_enabled(!is_target, egui::Button::new(&display).selected(is_selected));
+                                if btn.clicked() {
+                                    if *use_above {
+                                        chosen.clear();
+                                        for rr in 0..target_row {
+                                            chosen.push((rr, target_col));
+                                        }
+                                        *use_above = false;
+                                    } else if *use_left {
+                                        chosen.clear();
+                                        for cc in 0..target_col {
+                                            chosen.push((target_row, cc));
+                                        }
+                                        *use_left = false;
+                                    }
+                                    if let Some(pos) = chosen.iter().position(|&x| x == (r_idx, c_idx)) {
+                                        chosen.remove(pos);
+                                    } else {
+                                        chosen.push((r_idx, c_idx));
+                                        chosen.sort();
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
+
+            ui.add_space(6.0);
+            ui.checkbox(
+                keep_sig_figs,
+                "Keep maximum significant figures / precision from input cells (e.g. 10 + 5.23 = 15.23)",
+            );
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Formula:").weak());
+                ui.label(RichText::new(if built_formula.is_empty() { "(select cells)" } else { &built_formula }).monospace());
+                ui.add_space(16.0);
+                ui.label(RichText::new("Result Preview:").weak());
+                ui.label(RichText::new(&preview_val).strong().size(15.0).color(app.theme.accent));
+            });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!built_formula.is_empty(), egui::Button::new(RichText::new("  Apply Calculation  ").strong()))
+                    .clicked()
+                {
+                    apply_formula = Some(Some(built_formula.clone()));
+                }
+                if ui.button("Clear Formula").clicked() {
+                    apply_formula = Some(None);
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel_clicked = true;
+                }
+            });
+        });
+
+    if let Some(f_opt) = apply_formula {
+        let t = app.tab();
+        t.checkpoint(EditKind::Other, ctx.input(|i| i.time));
+        t.doc.table_set_cell_formula(table_id, target_row, target_col, f_opt);
+        t.changed();
+        *open = false;
+    } else if cancel_clicked {
+        *open = false;
+    }
 }

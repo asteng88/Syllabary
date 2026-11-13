@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
-use crate::doc::{lerp_rgb, Align, CharStyle, Document, ListKind, Para};
+use crate::doc::{lerp_rgb, Align, CellBorders, CellVAlign, CharStyle, Document, ListKind, Para, TableCellSpec};
 use crate::fonts::FontBook;
 
 /// egui points per inch at 100 % zoom.
@@ -38,8 +38,22 @@ pub struct Line {
     pub marker_x: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct LayoutCell {
+    pub table_id: u32,
+    pub row: u16,
+    pub col: u16,
+    pub page: usize,
+    /// Cell rectangle relative to the page's content box.
+    pub rect: Rect,
+    pub shading: Option<[u8; 3]>,
+    pub borders: CellBorders,
+    pub wrap_text: bool,
+}
+
 pub struct PageLayout {
     pub lines: Vec<Line>,
+    pub cells: Vec<LayoutCell>,
     pub pages: usize,
     pub ppi: f32,
     pub page_size: Vec2,
@@ -218,6 +232,169 @@ fn single_row(galley: &Arc<Galley>, row: usize, para: &Para, start: usize, end: 
     Arc::new(g)
 }
 
+/// Computes `(img_w, img_h, caption_h, total_h)` in layout points for an embedded image paragraph.
+pub fn image_box(doc: &Document, image_id: u64, avail_w: f32, ppi: f32) -> Option<(f32, f32, f32, f32)> {
+    let img = doc.image(image_id)?;
+    let zoom = (ppi / BASE_PPI).max(0.25);
+    let raw_w = (img.width_in * ppi).max(36.0 * zoom);
+    let img_w = raw_w.min(avail_w.max(36.0 * zoom));
+    let scale = if raw_w > 0.0 { img_w / raw_w } else { 1.0 };
+    let img_h = (img.height_in * ppi * scale).max(24.0 * zoom);
+    let cap_h = if !img.caption.trim().is_empty() { 22.0 * zoom } else { 18.0 * zoom };
+    let total_h = img_h + cap_h + 12.0 * zoom;
+    Some((img_w, img_h, cap_h, total_h))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_para_lines(
+    fonts: &mut egui::epaint::text::FontsView<'_>,
+    doc: &Document,
+    book: &FontBook,
+    pi: usize,
+    base_x: f32,
+    base_avail: f32,
+    ppi: f32,
+    wrap_text: bool,
+) -> Vec<Line> {
+    let para = &doc.paras[pi];
+    let fmt = para.fmt;
+    let hang = if fmt.list != ListKind::None { LIST_HANG * ppi } else { 0.0 };
+    let indent = fmt.indent as f32 * INDENT_STEP * ppi + hang;
+    let avail = (base_avail - indent).max(8.0);
+    let mut out = Vec::new();
+
+    if fmt.image_id > 0 {
+        if let Some((img_w, _img_h, _cap_h, total_h)) = image_box(doc, fmt.image_id, avail, ppi) {
+            let mut job = LayoutJob::default();
+            job.append(" ", 0.0, text_format(book, &para.end_style, ppi));
+            let galley = fonts.layout_job(job);
+            let offset = match fmt.align {
+                Align::Left | Align::Justify => 0.0,
+                Align::Center => ((avail - img_w) * 0.5).max(0.0),
+                Align::Right => (avail - img_w).max(0.0),
+            };
+            out.push(Line {
+                para: pi,
+                start: 0,
+                end: para.len(),
+                page: 0,
+                x: base_x + indent + offset,
+                y: 0.0,
+                height: total_h,
+                galley: single_row(&galley, 0, para, 0, para.len()),
+                xs: vec![0.0, img_w],
+                first_in_para: true,
+                last_in_para: true,
+                marker: None,
+                marker_x: base_x + indent,
+            });
+            return out;
+        }
+    }
+
+    let checked_checklist = fmt.list == ListKind::Checklist && fmt.checked;
+    let style_for = |s: &CharStyle| -> CharStyle {
+        if checked_checklist {
+            CharStyle {
+                strike: true,
+                color: if s.color == [0, 0, 0] { [110, 118, 129] } else { s.color },
+                ..*s
+            }
+        } else {
+            *s
+        }
+    };
+
+    let mut job = LayoutJob::default();
+    let empty = para.text.is_empty();
+    if empty {
+        job.append(" ", 0.0, text_format(book, &style_for(&para.end_style), ppi));
+    } else {
+        for (a, b, s) in para.runs() {
+            let text: String = para.text[a..b].iter().collect();
+            job.append(&text, 0.0, text_format(book, &style_for(&s), ppi));
+        }
+    }
+    job.wrap = TextWrapping {
+        max_width: if wrap_text { avail } else { f32::INFINITY },
+        ..Default::default()
+    };
+    job.justify = fmt.align == Align::Justify;
+    job.keep_trailing_whitespace = true;
+    let galley = fonts.layout_job(job);
+
+    let marker = if fmt.list != ListKind::None {
+        let s = para.style_at(0);
+        let text = doc.list_marker(pi);
+        let mut mj = LayoutJob::default();
+        mj.append(
+            &text,
+            0.0,
+            text_format(
+                book,
+                &CharStyle { underline: false, strike: false, highlight: None, highlight_to: None, link: 0, ..s },
+                ppi,
+            ),
+        );
+        Some(fonts.layout_job(mj))
+    } else {
+        None
+    };
+
+    let nrows = galley.rows.len();
+    let mut char_cursor = 0usize;
+    for r in 0..nrows {
+        let placed = &galley.rows[r];
+        let glyphs = &placed.row.glyphs;
+        let count = if empty { 0 } else { glyphs.len() };
+        let start = char_cursor.min(para.len());
+        let end = (char_cursor + count).min(para.len());
+        char_cursor += count;
+        if placed.ends_with_newline && para.text.get(char_cursor) == Some(&'\n') {
+            char_cursor += 1;
+        }
+        let mut trimmed = 0.0f32;
+        for g in glyphs.iter().rev() {
+            if !g.chr.is_whitespace() {
+                trimmed = g.pos.x + g.advance_width;
+                break;
+            }
+        }
+        let offset = match fmt.align {
+            Align::Left | Align::Justify => 0.0,
+            Align::Center => ((avail - trimmed) / 2.0).max(0.0),
+            Align::Right => (avail - trimmed).max(0.0),
+        };
+        let mut xs = Vec::with_capacity(end - start + 1);
+        for k in 0..(end - start) {
+            xs.push(offset + glyphs.get(k).map_or(0.0, |g| g.pos.x));
+        }
+        let end_x = if end > start {
+            glyphs.get(end - start - 1).map_or(0.0, |g| g.pos.x + g.advance_width)
+        } else {
+            0.0
+        };
+        xs.push(offset + end_x);
+        let h = placed.row.size.y.max(1.0) * fmt.line_spacing;
+        out.push(Line {
+            para: pi,
+            start,
+            end,
+            page: 0,
+            x: base_x + indent + offset,
+            y: 0.0,
+            height: h,
+            galley: single_row(&galley, r, para, start, end),
+            xs: xs.iter().map(|v| v - offset).collect(),
+            first_in_para: r == 0,
+            last_in_para: r + 1 == nrows,
+            marker: if r == 0 { marker.clone() } else { None },
+            marker_x: base_x + indent - hang,
+        });
+    }
+    out
+}
+
 pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, draft: bool) -> PageLayout {
     let draft = draft || doc.pageless;
     let ppi = BASE_PPI * zoom;
@@ -233,124 +410,188 @@ pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, dr
     };
     let pt = ppi / 72.0;
     let mut lines: Vec<Line> = Vec::new();
+    let mut cells: Vec<LayoutCell> = Vec::new();
     let mut page = 0usize;
     let mut y = 0.0f32;
 
     ctx.fonts_mut(|fonts| {
-        for (pi, para) in doc.paras.iter().enumerate() {
-            let fmt = para.fmt;
-            if fmt.page_break_before && pi > 0 && !draft {
-                page += 1;
-                y = 0.0;
-            }
-            if y > 0.0 {
-                y += fmt.space_before * pt;
-            }
-            let hang = if fmt.list != ListKind::None { LIST_HANG * ppi } else { 0.0 };
-            let indent = fmt.indent as f32 * INDENT_STEP * ppi + hang;
-            let avail = (content_size.x - indent).max(20.0);
-
-            let checked_checklist = fmt.list == ListKind::Checklist && fmt.checked;
-            let style_for = |s: &CharStyle| -> CharStyle {
-                if checked_checklist {
-                    CharStyle {
-                        strike: true,
-                        color: if s.color == [0, 0, 0] { [110, 118, 129] } else { s.color },
-                        ..*s
-                    }
-                } else {
-                    *s
-                }
-            };
-
-            let mut job = LayoutJob::default();
-            let empty = para.text.is_empty();
-            if empty {
-                job.append(" ", 0.0, text_format(book, &style_for(&para.end_style), ppi));
-            } else {
-                for (a, b, s) in para.runs() {
-                    let text: String = para.text[a..b].iter().collect();
-                    job.append(&text, 0.0, text_format(book, &style_for(&s), ppi));
-                }
-            }
-            job.wrap = TextWrapping { max_width: avail, ..Default::default() };
-            job.justify = fmt.align == Align::Justify;
-            job.keep_trailing_whitespace = true;
-            let galley = fonts.layout_job(job);
-
-            // marker for bullets / numbers (checklists draw interactive vector checkboxes in editor.rs,
-            // but also keep a marker galley for PDF export)
-            let marker = if fmt.list != ListKind::None {
-                let s = para.style_at(0);
-                let text = doc.list_marker(pi);
-                let mut mj = LayoutJob::default();
-                mj.append(&text, 0.0, text_format(book, &CharStyle { underline: false, strike: false, highlight: None, highlight_to: None, link: 0, ..s }, ppi));
-                Some(fonts.layout_job(mj))
-            } else {
-                None
-            };
-
-            let nrows = galley.rows.len();
-            let mut char_cursor = 0usize;
-            for r in 0..nrows {
-                let placed = &galley.rows[r];
-                let glyphs = &placed.row.glyphs;
-                let count = if empty { 0 } else { glyphs.len() };
-                let start = char_cursor.min(para.len());
-                let end = (char_cursor + count).min(para.len());
-                char_cursor += count;
-                // trimmed row width for alignment
-                let mut trimmed = 0.0f32;
-                for g in glyphs.iter().rev() {
-                    if !g.chr.is_whitespace() {
-                        trimmed = g.pos.x + g.advance_width;
-                        break;
-                    }
-                }
-                let offset = match fmt.align {
-                    Align::Left | Align::Justify => 0.0,
-                    Align::Center => ((avail - trimmed) / 2.0).max(0.0),
-                    Align::Right => (avail - trimmed).max(0.0),
-                };
-                let mut xs = Vec::with_capacity(end - start + 1);
-                for k in 0..(end - start) {
-                    xs.push(offset + glyphs.get(k).map_or(0.0, |g| g.pos.x));
-                }
-                let end_x = if end > start {
-                    glyphs.get(end - start - 1).map_or(0.0, |g| g.pos.x + g.advance_width)
-                } else {
-                    0.0
-                };
-                xs.push(offset + end_x);
-                let h = placed.row.size.y.max(1.0) * fmt.line_spacing;
-                if !draft && y + h > content_size.y && y > 0.0 {
+        let mut pi = 0usize;
+        while pi < doc.paras.len() {
+            let tid = doc.paras[pi].fmt.table_id;
+            if tid == 0 {
+                let fmt = doc.paras[pi].fmt;
+                if fmt.page_break_before && pi > 0 && !draft {
                     page += 1;
                     y = 0.0;
                 }
-                lines.push(Line {
-                    para: pi,
-                    start,
-                    end,
-                    page,
-                    x: indent + offset,
-                    y,
-                    height: h,
-                    galley: single_row(&galley, r, para, start, end),
-                    xs: xs.iter().map(|v| v - offset).collect(),
-                    first_in_para: r == 0,
-                    last_in_para: r + 1 == nrows,
-                    marker: if r == 0 { marker.clone() } else { None },
-                    marker_x: indent - hang,
-                });
-                y += h;
+                if y > 0.0 {
+                    y += fmt.space_before * pt;
+                }
+                let para_lines = shape_para_lines(fonts, doc, book, pi, 0.0, content_size.x, ppi, true);
+                for mut l in para_lines {
+                    if !draft && y + l.height > content_size.y && y > 0.0 {
+                        page += 1;
+                        y = 0.0;
+                    }
+                    l.page = page;
+                    l.y = y;
+                    y += l.height;
+                    lines.push(l);
+                }
+                y += fmt.space_after * pt;
+                pi += 1;
+                continue;
             }
-            y += fmt.space_after * pt;
+
+            // Group contiguous paragraphs belonging to table `tid`
+            let mut tbl_end = pi + 1;
+            while tbl_end < doc.paras.len() && doc.paras[tbl_end].fmt.table_id == tid {
+                tbl_end += 1;
+            }
+            if doc.paras[pi].fmt.page_break_before && pi > 0 && !draft {
+                page += 1;
+                y = 0.0;
+            }
+
+            let tbl_opt = doc.table(tid);
+            let tbl_indent_x = tbl_opt.map_or(0.0, |t| (t.indent_in * ppi).max(0.0));
+            let max_para_row = doc.paras[pi..tbl_end]
+                .iter()
+                .map(|p| p.fmt.table_row as usize)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let num_rows = tbl_opt.map_or(max_para_row, |t| t.rows.len().max(max_para_row));
+
+            // Compute horizontal scale if table exceeds content_size.x
+            let raw_tbl_w = tbl_opt
+                .and_then(|t| {
+                    let grid_sum: f32 = t.grid_cols_in.iter().sum();
+                    if grid_sum > 0.0 {
+                        Some(grid_sum * ppi)
+                    } else {
+                        t.rows.first().map(|r| r.cells.iter().map(|c| c.width_in * ppi).sum())
+                    }
+                })
+                .unwrap_or(content_size.x);
+            let avail_tbl_w = (content_size.x - tbl_indent_x).max(40.0 * zoom);
+            let col_scale = if raw_tbl_w > avail_tbl_w + 1.0 { avail_tbl_w / raw_tbl_w } else { 1.0 };
+
+            for r_idx in 0..num_rows {
+                let row_spec = tbl_opt.and_then(|t| t.rows.get(r_idx));
+                let max_para_col = doc.paras[pi..tbl_end]
+                    .iter()
+                    .filter(|p| p.fmt.table_row as usize == r_idx)
+                    .map(|p| p.fmt.table_col as usize + 1)
+                    .max()
+                    .unwrap_or(1);
+                let num_cols = row_spec.map_or(max_para_col, |rs| rs.cells.len().max(max_para_col));
+
+                struct ShapedCell {
+                    col: u16,
+                    x: f32,
+                    w: f32,
+                    pad_t: f32,
+                    pad_b: f32,
+                    text_h: f32,
+                    natural_h: f32,
+                    spec: TableCellSpec,
+                    lines: Vec<Line>,
+                }
+
+                let mut shaped_cells: Vec<ShapedCell> = Vec::with_capacity(num_cols);
+                let mut cell_x = tbl_indent_x;
+                for c_idx in 0..num_cols {
+                    let spec = row_spec
+                        .and_then(|rs| rs.cells.get(c_idx))
+                        .cloned()
+                        .unwrap_or_else(|| TableCellSpec {
+                            width_in: (content_size.x / ppi) / (num_cols.max(1) as f32),
+                            ..TableCellSpec::default()
+                        });
+                    let cell_w = (spec.width_in * ppi * col_scale).max(12.0 * zoom);
+                    let pad_l = spec.pad_left_in * ppi * col_scale;
+                    let pad_r = spec.pad_right_in * ppi * col_scale;
+                    let pad_t = spec.pad_top_in * ppi;
+                    let pad_b = spec.pad_bottom_in * ppi;
+                    let inner_avail = (cell_w - pad_l - pad_r).max(6.0 * zoom);
+
+                    let mut cell_lines: Vec<Line> = Vec::new();
+                    let mut local_y = pad_t;
+                    for p_idx in pi..tbl_end {
+                        let pfmt = doc.paras[p_idx].fmt;
+                        if pfmt.table_row as usize == r_idx && pfmt.table_col as usize == c_idx {
+                            local_y += pfmt.space_before * pt;
+                            let p_lines = shape_para_lines(fonts, doc, book, p_idx, cell_x + pad_l, inner_avail, ppi, spec.wrap_text);
+                            for mut l in p_lines {
+                                l.y = local_y;
+                                local_y += l.height;
+                                cell_lines.push(l);
+                            }
+                            local_y += pfmt.space_after * pt;
+                        }
+                    }
+                    let text_h = (local_y - pad_t).max(0.0);
+                    let natural_h = (local_y + pad_b).max(4.0 * zoom);
+                    shaped_cells.push(ShapedCell {
+                        col: c_idx as u16,
+                        x: cell_x,
+                        w: cell_w,
+                        pad_t,
+                        pad_b,
+                        text_h,
+                        natural_h,
+                        spec,
+                        lines: cell_lines,
+                    });
+                    cell_x += cell_w;
+                }
+
+                let min_row_h = row_spec.map_or(0.0, |rs| rs.min_height_pt * pt);
+                let row_h = shaped_cells
+                    .iter()
+                    .map(|sc| sc.natural_h)
+                    .fold(min_row_h, f32::max);
+
+                if !draft && y + row_h > content_size.y && y > 0.0 {
+                    page += 1;
+                    y = 0.0;
+                }
+
+                for sc in shaped_cells {
+                    let dy = match sc.spec.v_align {
+                        CellVAlign::Top => 0.0,
+                        CellVAlign::Center => ((row_h - sc.text_h) * 0.5 - sc.pad_t).max(-sc.pad_t),
+                        CellVAlign::Bottom => (row_h - sc.pad_b - sc.text_h - sc.pad_t).max(-sc.pad_t),
+                    };
+                    for mut l in sc.lines {
+                        l.page = page;
+                        l.y += y + dy;
+                        lines.push(l);
+                    }
+                    cells.push(LayoutCell {
+                        table_id: tid,
+                        row: r_idx as u16,
+                        col: sc.col,
+                        page,
+                        rect: Rect::from_min_size(Pos2::new(sc.x, y), Vec2::new(sc.w, row_h)),
+                        shading: sc.spec.shading,
+                        borders: sc.spec.borders,
+                        wrap_text: sc.spec.wrap_text,
+                    });
+                }
+
+                y += row_h;
+            }
+
+            pi = tbl_end;
         }
     });
 
+    lines.sort_by_key(|l| (l.para, l.start));
     let pages = page + 1;
     let page_size = if draft { Vec2::new(page_size.x, (y + content_offset.y * 2.0).max(page_size.y)) } else { page_size };
-    PageLayout { lines, pages, ppi, page_size, content_offset, content_size, draft }
+    PageLayout { lines, cells, pages, ppi, page_size, content_offset, content_size, draft }
 }
 
 impl PageLayout {
@@ -402,4 +643,99 @@ impl PageLayout {
         }
         l.end
     }
+}
+
+/// Measures the natural unwrapped content width (in inches, including horizontal cell padding)
+/// needed to fit all cells in the column corresponding to `(table_id, ref_row, ref_col)`.
+pub fn measure_column_autofit_width_in(
+    ctx: &egui::Context,
+    doc: &Document,
+    book: &FontBook,
+    table_id: u32,
+    ref_row: usize,
+    ref_col: usize,
+) -> Option<f32> {
+    let tbl = doc.table(table_id)?;
+    let ppi = BASE_PPI;
+    let avail_page_w = (doc.page.width - doc.page.margin_left - doc.page.margin_right).max(1.5);
+    let target_grid: usize = tbl
+        .rows
+        .get(ref_row)
+        .map_or(ref_col, |r| {
+            let gs: usize = r.cells.iter().take(ref_col).map(|c| c.grid_span.max(1) as usize).sum();
+            let sp = r.cells.get(ref_col).map_or(1, |c| c.grid_span.max(1) as usize);
+            gs + sp - 1
+        });
+
+    let mut max_w_in = 0.55_f32;
+    ctx.fonts_mut(|fonts| {
+        for (r_idx, r) in tbl.rows.iter().enumerate() {
+            let mut g_cur = 0usize;
+            for (c_idx, cell) in r.cells.iter().enumerate() {
+                let sp = cell.grid_span.max(1) as usize;
+                let matches_col = if sp == 1 {
+                    g_cur == target_grid
+                } else {
+                    r_idx == ref_row && c_idx == ref_col
+                };
+                g_cur += sp;
+                if !matches_col {
+                    continue;
+                }
+                let pad_x = cell.pad_left_in + cell.pad_right_in + 0.08;
+                for (pi, p) in doc.paras.iter().enumerate() {
+                    if p.fmt.table_id == table_id && p.fmt.table_row as usize == r_idx && p.fmt.table_col as usize == c_idx {
+                        let lines = shape_para_lines(fonts, doc, book, pi, 0.0, 10_000.0, ppi, false);
+                        for l in lines {
+                            let w_pts = l.xs.last().copied().unwrap_or(0.0).max(l.galley.rect.width());
+                            let indent_in = (p.fmt.indent as f32) * INDENT_STEP
+                                + if p.fmt.list != ListKind::None { LIST_HANG } else { 0.0 };
+                            let w_in = (w_pts / ppi) + pad_x + indent_in;
+                            max_w_in = max_w_in.max(w_in);
+                        }
+                    }
+                }
+            }
+        }
+    });
+    Some(max_w_in.clamp(0.45, avail_page_w))
+}
+
+/// Measures the exact natural height (in typographic points, 1/72 in) needed to fit the contents
+/// of `row` in `table_id` at its current column widths.
+pub fn measure_row_autofit_height_pt(
+    ctx: &egui::Context,
+    doc: &Document,
+    book: &FontBook,
+    table_id: u32,
+    row: usize,
+) -> Option<f32> {
+    let tbl = doc.table(table_id)?;
+    let row_spec = tbl.rows.get(row)?;
+    let ppi = BASE_PPI;
+    let pt = ppi / 72.0;
+    let mut max_h_px = 14.0 * pt;
+    ctx.fonts_mut(|fonts| {
+        for (c_idx, spec) in row_spec.cells.iter().enumerate() {
+            let cell_w = (spec.width_in * ppi).max(12.0);
+            let pad_l = spec.pad_left_in * ppi;
+            let pad_r = spec.pad_right_in * ppi;
+            let pad_t = spec.pad_top_in * ppi;
+            let pad_b = spec.pad_bottom_in * ppi;
+            let inner_avail = (cell_w - pad_l - pad_r).max(6.0);
+            let mut local_y = pad_t;
+            for (pi, p) in doc.paras.iter().enumerate() {
+                if p.fmt.table_id == table_id && p.fmt.table_row as usize == row && p.fmt.table_col as usize == c_idx {
+                    local_y += p.fmt.space_before * pt;
+                    let p_lines = shape_para_lines(fonts, doc, book, pi, 0.0, inner_avail, ppi, spec.wrap_text);
+                    for l in p_lines {
+                        local_y += l.height;
+                    }
+                    local_y += p.fmt.space_after * pt;
+                }
+            }
+            max_h_px = max_h_px.max(local_y + pad_b);
+        }
+    });
+    Some((max_h_px / pt).clamp(12.0, 720.0))
 }

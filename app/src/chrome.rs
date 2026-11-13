@@ -109,8 +109,8 @@ fn mcheck(ui: &mut egui::Ui, th: &Theme, checked: bool, label: &str, sc: &str) -
 }
 
 impl App {
-    /// Unified Studio Header: Scribe crest, inline editable document title, star, status pill,
-    /// integrated document tab pills, command search trigger, history, comments, mode switcher, and theme pill.
+    /// Unified Studio Header: Scribe crest, menu bar capsule, star & status pill,
+    /// command search trigger, history, comments, mode switcher, theme pill, and document tab bar below.
     pub fn docs_header(&mut self, ui: &mut egui::Ui, th: &Theme) {
         let starred = self.tab_ref().doc.starred;
         let dirty = self.tab_ref().dirty;
@@ -121,29 +121,22 @@ impl App {
             let (logo_r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
             icons::draw(ui.painter(), logo_r, Icon::DocsLogo, th.icon, th.accent);
 
-            if self.editing_title {
-                let mut name = self.tab_ref().name.clone();
-                let te = ui.add(egui::TextEdit::singleline(&mut name).desired_width(200.0).font(FontId::proportional(15.0)));
-                if te.changed() && !name.trim().is_empty() {
-                    let t = self.tab();
-                    t.name = name.trim().to_string();
-                    t.dirty = true;
-                }
-                if te.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)) {
-                    self.editing_title = false;
-                }
-            } else {
-                let active_name = self.tab_ref().name.clone();
-                let title_txt = RichText::new(&active_name).size(15.0).color(th.text).strong();
-                let btn = ui
-                    .add(egui::Button::new(title_txt).frame(false))
-                    .on_hover_text("Click to rename document");
-                ui.interact(btn.rect, egui::Id::unique("doc-title-a11y"), Sense::hover())
-                    .widget_info(move || egui::WidgetInfo::labeled(egui::Role::TitleBar, true, active_name.clone()));
-                if btn.clicked() {
-                    self.editing_title = true;
-                }
-            }
+            // Sculpted Studio Menu Capsule anchored right next to the app icon
+            Frame::new()
+                .fill(th.surface_subtle)
+                .stroke(Stroke::new(1.0, th.border))
+                .corner_radius(9)
+                .inner_margin(Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    let r = ui.horizontal(|ui| {
+                        self.menus(ui, th);
+                    });
+                    // the original's menu bar is named "Application"
+                    ui.interact(r.response.rect, egui::Id::unique("menubar-a11y"), Sense::hover())
+                        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuBar, true, "Application"));
+                });
+
+            sep(ui, th);
 
             let star_ic = if starred { Icon::StarFilled } else { Icon::Star };
             if icon_button(ui, th, star_ic, if starred { "Starred document (click to unstar)" } else { "Star this document" }, false, true).clicked() {
@@ -174,69 +167,6 @@ impl App {
                     });
             }
 
-            // Integrated Document Tabs & New Document button right in the header
-            sep(ui, th);
-            let mut close_tab = None;
-            let mut select_tab = None;
-            if self.tabs.len() > 1 {
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let active = i == self.active;
-                    let fill = if active { th.surface_elevated } else { th.surface_subtle };
-                    let stroke = if active {
-                        Stroke::new(1.0, th.accent.gamma_multiply(0.45))
-                    } else {
-                        Stroke::new(1.0, th.border)
-                    };
-                    Frame::new()
-                        .fill(fill)
-                        .stroke(stroke)
-                        .corner_radius(8)
-                        .inner_margin(Margin { left: 9, right: 5, top: 3, bottom: 3 })
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                let txt = RichText::new(t.title()).size(12.0).color(if active { th.text } else { th.subtle });
-                                if ui.add(egui::Label::new(txt).sense(Sense::click())).clicked() {
-                                    select_tab = Some(i);
-                                }
-                                let (r, cr) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
-                                if cr.hovered() {
-                                    ui.painter().rect_filled(r, 4.0, th.hover);
-                                }
-                                icons::draw(ui.painter(), r.shrink(3.5), Icon::Close, th.subtle, th.accent);
-                                if cr.on_hover_text("Close tab").clicked() {
-                                    close_tab = Some(i);
-                                }
-                            });
-                        });
-                }
-            }
-            if icon_button(ui, th, Icon::New, "New document tab (Ctrl+N)", false, true).clicked() {
-                self.act(Action::New);
-            }
-            if let Some(i) = select_tab {
-                self.act(Action::SelectTab(i));
-            }
-            if let Some(i) = close_tab {
-                self.act(Action::Close(i));
-            }
-
-            // Sculpted Studio Menu Capsule integrated directly into the header bar
-            ui.add_space(4.0);
-            Frame::new()
-                .fill(th.surface_subtle)
-                .stroke(Stroke::new(1.0, th.border))
-                .corner_radius(9)
-                .inner_margin(Margin::symmetric(6, 2))
-                .show(ui, |ui| {
-                    let r = egui::MenuBar::new().ui(ui, |ui| {
-                        self.menus(ui, th);
-                    });
-                    // the original's menu bar is named "Application"
-                    ui.interact(r.response.rect, egui::Id::unique("menubar-a11y"), Sense::hover())
-                        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuBar, true, "Application"));
-                });
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
 
@@ -264,7 +194,7 @@ impl App {
                 }
 
                 // Mode selector pill (Editing / Suggesting / Viewing)
-                let mode_r = combo_box_button(ui, th, 96.0, self.mode.label(), FontId::proportional(12.5), "Document mode (Editing / Suggesting / Viewing)");
+                let mode_r = combo_box_button(ui, th, 108.0, self.mode.label(), FontId::proportional(12.5), "Document mode (Editing / Suggesting / Viewing)");
                 egui::Popup::menu(&mode_r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                     fit_menu(
                         ui,
@@ -297,8 +227,8 @@ impl App {
                     ui.label(RichText::new(format!("{open_comments}")).size(11.5).color(th.accent).strong());
                 }
 
-                if icon_button(ui, th, Icon::History, "Version history (Ctrl+Alt+Shift+H)", false, true).clicked() {
-                    self.act(Action::Dialog(Dialog::VersionHistory(0, String::new())));
+                if icon_button(ui, th, Icon::History, "Version history (Ctrl+Alt+Shift+H)", self.show_history, true).clicked() {
+                    self.act(Action::ToggleHistory);
                 }
 
                 // Quick Command Search Pill (Alt+/)
@@ -327,6 +257,103 @@ impl App {
                 }
             });
         });
+
+        // Dedicated Document Tabs row underneath the menu bar (horizontally scrollable when many tabs are open)
+        ui.add_space(4.0);
+        let mut close_tab = None;
+        let mut select_tab = None;
+        let mut new_tab = false;
+        let mut renamed = None;
+        let mut start_edit_title = false;
+        let mut stop_edit_title = false;
+        let can_close = self.tabs.len() > 1;
+        egui::ScrollArea::horizontal()
+            .id_salt("doc-tabs-strip")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (i, t) in self.tabs.iter().enumerate() {
+                        let active = i == self.active;
+                        let fill = if active { th.surface_elevated } else { th.surface_subtle };
+                        let stroke = if active {
+                            Stroke::new(1.0, th.accent.gamma_multiply(0.50))
+                        } else {
+                            Stroke::new(1.0, th.border)
+                        };
+                        Frame::new()
+                            .fill(fill)
+                            .stroke(stroke)
+                            .corner_radius(8)
+                            .inner_margin(Margin {
+                                left: 10,
+                                right: if can_close { 6 } else { 10 },
+                                top: 3,
+                                bottom: 3,
+                            })
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 5.0;
+                                    if active && self.editing_title {
+                                        let mut name = t.name.clone();
+                                        let te = ui.add(egui::TextEdit::singleline(&mut name).desired_width(180.0).font(FontId::proportional(12.0)));
+                                        if te.changed() && !name.trim().is_empty() {
+                                            renamed = Some(name.trim().to_string());
+                                        }
+                                        if te.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter) || inp.key_pressed(egui::Key::Escape)) {
+                                            stop_edit_title = true;
+                                        }
+                                    } else {
+                                        let txt = if active {
+                                            RichText::new(t.title()).size(12.0).color(th.text).strong()
+                                        } else {
+                                            RichText::new(t.title()).size(12.0).color(th.subtle)
+                                        };
+                                        let lbl = ui.add(egui::Label::new(txt).sense(Sense::click()));
+                                        if lbl.double_clicked() && active {
+                                            start_edit_title = true;
+                                        } else if lbl.clicked() {
+                                            select_tab = Some(i);
+                                        }
+                                    }
+                                    if can_close {
+                                        let (r, cr) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
+                                        if cr.hovered() {
+                                            ui.painter().rect_filled(r, 4.0, th.hover);
+                                        }
+                                        icons::draw(ui.painter(), r.shrink(3.5), Icon::Close, th.subtle, th.accent);
+                                        if cr.on_hover_text("Close tab").clicked() {
+                                            close_tab = Some(i);
+                                        }
+                                    }
+                                });
+                            });
+                    }
+                    if icon_button(ui, th, Icon::New, "New document tab (Ctrl+N)", false, true).clicked() {
+                        new_tab = true;
+                    }
+                });
+            });
+        if let Some(new_name) = renamed {
+            let t = self.tab();
+            t.name = new_name;
+            t.dirty = true;
+        }
+        if start_edit_title {
+            self.editing_title = true;
+        }
+        if stop_edit_title {
+            self.editing_title = false;
+        }
+        if new_tab {
+            self.act(Action::New);
+        }
+        if let Some(i) = select_tab {
+            self.act(Action::SelectTab(i));
+        }
+        if let Some(i) = close_tab {
+            self.act(Action::Close(i));
+        }
     }
 
     pub fn menus(&mut self, ui: &mut egui::Ui, th: &Theme) {
@@ -491,10 +518,10 @@ impl App {
                     ],
                 );
                 if mitem(ui, th, Icon::EditMode, "Name current version…", "") {
-                    self.act(Action::Dialog(Dialog::VersionHistory(0, "Milestone".into())));
+                    self.act(Action::OpenNameVersion);
                 }
                 if mitem(ui, th, Icon::History, "See version history", "Ctrl+Alt+Shift+H") {
-                    self.act(Action::Dialog(Dialog::VersionHistory(0, String::new())));
+                    self.act(Action::ToggleHistory);
                 }
             });
             ui.separator();
@@ -691,6 +718,7 @@ impl App {
             fit_menu(
                 ui,
                 &[
+                    ("Image from file…", ""),
                     ("Table", "▸"),
                     ("Building blocks", "▸"),
                     ("Smart chips", "▸"),
@@ -708,13 +736,124 @@ impl App {
                     ("Table of contents", ""),
                 ],
             );
+            if mitem(ui, th, Icon::Image, "Image from file…", "") {
+                self.act(Action::InsertImage);
+            }
+            ui.separator();
             ui.menu_button("Table", |ui| {
-                fit_menu(ui, &[("2 × 2 Table", ""), ("3 × 3 Tracker Table", "")]);
-                if mitem(ui, th, Icon::Table, "2 × 2 Table", "") {
-                    self.act(Action::InsertBuildingBlock("table_2x2"));
+                let (in_tbl, cur_wrap) = {
+                    let t = self.tab_ref();
+                    let fmt = t.doc.paras[t.doc.clamp(t.caret).p].fmt;
+                    let w = if fmt.table_id > 0 {
+                        t.doc
+                            .table(fmt.table_id)
+                            .and_then(|tb| tb.rows.get(fmt.table_row as usize))
+                            .and_then(|rw| rw.cells.get(fmt.table_col as usize))
+                            .is_none_or(|c| c.wrap_text)
+                    } else {
+                        true
+                    };
+                    (fmt.table_id > 0, w)
+                };
+                fit_menu(
+                    ui,
+                    &[
+                        ("Insert Table…", ""),
+                        ("2 × 2 Table", ""),
+                        ("3 × 3 Table", ""),
+                        ("4 × 4 Table", ""),
+                        ("Cell Math (Sum / Subtotal / Average / Median)…", ""),
+                        ("Select Entire Row", ""),
+                        ("Select Entire Column", ""),
+                        ("Auto-Fit Column Width to Contents", ""),
+                        ("Auto-Fit Row Height to Contents", ""),
+                        ("Wrap Text in Cell", "✓"),
+                        ("Merge Cell with Right", ""),
+                        ("Merge Entire Row (Banner)", ""),
+                        ("Split Merged Cell", ""),
+                        ("Insert Row Above", ""),
+                        ("Insert Row Below", ""),
+                        ("Insert Column Left", ""),
+                        ("Insert Column Right", ""),
+                        ("Delete Current Row", ""),
+                        ("Delete Current Column", ""),
+                    ],
+                );
+                if mitem(ui, th, Icon::Table, "Insert Table…", "") {
+                    self.act(Action::Dialog(Dialog::InsertTable {
+                        rows: 3,
+                        cols: 3,
+                        header_shading: None,
+                    }));
                 }
-                if mitem(ui, th, Icon::Table, "3 × 3 Tracker Table", "") {
-                    self.act(Action::InsertBuildingBlock("table_3x3"));
+                if mitem(ui, th, Icon::Table, "2 × 2 Table", "") {
+                    self.act(Action::InsertTable {
+                        rows: 2,
+                        cols: 2,
+                        header_shading: None,
+                    });
+                }
+                if mitem(ui, th, Icon::Table, "3 × 3 Table", "") {
+                    self.act(Action::InsertTable {
+                        rows: 3,
+                        cols: 3,
+                        header_shading: None,
+                    });
+                }
+                if mitem(ui, th, Icon::Table, "4 × 4 Table", "") {
+                    self.act(Action::InsertTable {
+                        rows: 4,
+                        cols: 4,
+                        header_shading: None,
+                    });
+                }
+                ui.separator();
+                if mitem_en(ui, th, in_tbl, Some(Icon::Table), "Cell Math (Sum / Subtotal / Average / Median)…", "") {
+                    self.act(Action::OpenTableMath);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Select Entire Row", "") {
+                    self.act(Action::TableSelectRow);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Select Entire Column", "") {
+                    self.act(Action::TableSelectCol);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Auto-Fit Column Width to Contents", "") {
+                    self.act(Action::TableAutoFitCol);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Auto-Fit Row Height to Contents", "") {
+                    self.act(Action::TableAutoFitRow);
+                }
+                if mitem_en(ui, th, in_tbl, if in_tbl && cur_wrap { Some(Icon::Check) } else { None }, "Wrap Text in Cell", "") {
+                    self.act(Action::TableToggleWrap);
+                }
+                ui.separator();
+                if mitem_en(ui, th, in_tbl, None, "Merge Cell with Right", "") {
+                    self.act(Action::TableMergeRight);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Merge Entire Row (Banner)", "") {
+                    self.act(Action::TableMergeRow);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Split Merged Cell", "") {
+                    self.act(Action::TableSplitCell);
+                }
+                ui.separator();
+                if mitem_en(ui, th, in_tbl, None, "Insert Row Above", "") {
+                    self.act(Action::TableInsertRow { above: true });
+                }
+                if mitem_en(ui, th, in_tbl, None, "Insert Row Below", "") {
+                    self.act(Action::TableInsertRow { above: false });
+                }
+                if mitem_en(ui, th, in_tbl, None, "Insert Column Left", "") {
+                    self.act(Action::TableInsertCol { left: true });
+                }
+                if mitem_en(ui, th, in_tbl, None, "Insert Column Right", "") {
+                    self.act(Action::TableInsertCol { left: false });
+                }
+                if mitem_en(ui, th, in_tbl, None, "Delete Current Row", "") {
+                    self.act(Action::TableDeleteRow);
+                }
+                if mitem_en(ui, th, in_tbl, None, "Delete Current Column", "") {
+                    self.act(Action::TableDeleteCol);
                 }
             });
             ui.menu_button("Building blocks", |ui| {
@@ -1537,12 +1676,24 @@ impl App {
         });
         sep(ui, th);
 
-        // Link, Comment, @ Smart Chip / Building Block
+        // Link, Comment, Image, @ Smart Chip / Building Block
         let cur_sel_txt = self.tab_ref().selected_text();
         if icon_button(ui, th, Icon::Link, "Insert link (Ctrl+K)", st.link > 0, true).clicked() {
             self.act(Action::Dialog(Dialog::Link { text: cur_sel_txt, url: String::new() }));
         }
         b!(Icon::Comment, "Add comment (Ctrl+Alt+M)", false, true, Action::Dialog(Dialog::Comment(String::new())));
+        b!(Icon::Image, "Insert image from file…", false, true, Action::InsertImage);
+        b!(
+            Icon::Table,
+            "Insert table…",
+            fmt.table_id > 0,
+            true,
+            Action::Dialog(Dialog::InsertTable {
+                rows: 3,
+                cols: 3,
+                header_shading: None
+            })
+        );
         b!(Icon::SmartChip, "Insert smart chip / building block (@)", false, true, Action::Dialog(Dialog::AtMenu(String::new())));
         sep(ui, th);
 
@@ -1628,7 +1779,7 @@ impl App {
         let page = t.current_page + 1;
         let pageless = t.doc.pageless;
         let path = t.path.as_ref().map(|p| p.display().to_string());
-        let font = FONT_NAMES[st.font as usize % FONT_NAMES.len()];
+        let font = font_name(st.font);
         let draft = self.draft;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -2020,6 +2171,133 @@ impl App {
             }
         }
     }
+
+    /// Google Docs Right Sidebar: Version History.
+    pub fn history_pane(&mut self, ui: &mut egui::Ui, th: &Theme, now: f64) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Version history").strong().color(th.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (r, cr) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                if cr.hovered() {
+                    ui.painter().rect_filled(r, 4.0, th.hover);
+                }
+                icons::draw(ui.painter(), r.shrink(4.0), Icon::Close, th.subtle, th.accent);
+                if cr.on_hover_text("Close version history").clicked() {
+                    self.act(Action::ToggleHistory);
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let mut save_ver = false;
+        ui.horizontal(|ui| {
+            let te = ui.add(
+                egui::TextEdit::singleline(&mut self.history_ver_name)
+                    .desired_width((ui.available_width() - 56.0).max(100.0))
+                    .hint_text("Name current version…"),
+            );
+            if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                save_ver = true;
+            }
+            if ui.small_button("Save").on_hover_text("Save a named snapshot of the current document").clicked() {
+                save_ver = true;
+            }
+        });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        let versions = self.tab_ref().versions.clone();
+        let mut restore_idx: Option<usize> = None;
+
+        if versions.is_empty() {
+            ui.label(
+                RichText::new("No named versions saved yet.\nEnter a name above and click Save, or save the document (Ctrl+S) to record a snapshot.")
+                    .weak()
+                    .size(12.0),
+            );
+        } else {
+            self.history_sel_idx = self.history_sel_idx.min(versions.len() - 1);
+            egui::ScrollArea::vertical().id_salt("history-pane-scroll").auto_shrink([false, false]).show(ui, |ui| {
+                for (i, v) in versions.iter().enumerate().rev() {
+                    let selected = i == self.history_sel_idx;
+                    let card_bg = if th.dark { Color32::from_rgb(38, 41, 46) } else { Color32::WHITE };
+                    let stroke = if selected { Stroke::new(1.5, th.accent) } else { Stroke::new(1.0, th.border) };
+                    let resp = Frame::new()
+                        .fill(card_bg)
+                        .corner_radius(8)
+                        .stroke(stroke)
+                        .inner_margin(Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&v.name).strong().size(12.5).color(if selected { th.accent } else { th.text }));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(format!("{} words", v.words)).weak().size(11.0));
+                                });
+                            });
+                            ui.label(RichText::new(&v.timestamp).weak().size(11.0));
+                            if selected {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                let preview = from_json(&v.snapshot_json).map(|d| d.plain_text()).unwrap_or_default();
+                                let preview_trimmed: String = preview.chars().take(500).collect();
+                                egui::ScrollArea::vertical().id_salt(("vh_card_prev", i)).max_height(140.0).show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(if preview_trimmed.is_empty() { "(Empty document)" } else { &preview_trimmed })
+                                            .size(11.5)
+                                            .color(th.subtle),
+                                    );
+                                });
+                                ui.add_space(6.0);
+                                if ui.button("Restore this version").clicked() {
+                                    restore_idx = Some(i);
+                                }
+                            }
+                        })
+                        .response;
+                    if resp.interact(Sense::click()).clicked() {
+                        self.history_sel_idx = i;
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        }
+
+        if save_ver {
+            let name = if self.history_ver_name.trim().is_empty() {
+                format!("Version {}", self.tab_ref().versions.len() + 1)
+            } else {
+                self.history_ver_name.trim().to_string()
+            };
+            self.history_ver_name.clear();
+            let t = self.tab();
+            let (_, words) = t.doc.counts(None);
+            let snap = to_json(&t.doc);
+            let ts = chrono::Local::now().format("%b %-d, %-I:%M %p").to_string();
+            t.versions.push(DocVersion {
+                name: name.clone(),
+                timestamp: ts,
+                words,
+                snapshot_json: snap,
+            });
+            self.history_sel_idx = t.versions.len().saturating_sub(1);
+            self.toast(format!("Saved version “{name}”"));
+        }
+        if let Some(i) = restore_idx {
+            if let Some(v) = versions.get(i) {
+                if let Ok(restored) = from_json(&v.snapshot_json) {
+                    let t = self.tab();
+                    t.checkpoint(crate::editor::EditKind::Other, now);
+                    t.doc = restored;
+                    t.set_caret(Pos::new(0, 0), false);
+                    t.changed();
+                    self.toast(format!("Restored version “{}”", v.name));
+                }
+            }
+        }
+    }
 }
 
 /// Vertically centers a single-row galley inside `rect` by the actual cap-height of its first visible glyph,
@@ -2069,7 +2347,7 @@ pub fn combo_box_button(ui: &mut egui::Ui, th: &Theme, width: f32, text: &str, f
 /// Toolbar button that shows the current font name in that font.
 pub fn font_button(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, font: u8) -> egui::Response {
     let (fam, _) = book.family(font, false, false);
-    let name = FONT_NAMES[font as usize % FONT_NAMES.len()];
+    let name = font_name(font);
     combo_box_button(ui, th, 154.0, name, FontId::new(14.5, fam), "Font")
 }
 
@@ -2084,6 +2362,7 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
         r.request_focus();
     }
     let q = search.trim().to_lowercase();
+    let total_fonts = font_count();
     let available = |i: u8| book.faces.get(&(i, 0)).is_some_and(|f| f.is_some());
     let row = |ui: &mut egui::Ui, i: u8| -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
@@ -2093,7 +2372,7 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
             ui.painter().rect_filled(rect, 6.0, th.hover);
         }
         let (fam, _) = book.family(i, false, false);
-        let name = FONT_NAMES[i as usize];
+        let name = font_name(i);
         let bundled = crate::doc::bundled_folder(i).is_some();
         let text_clip = egui::Rect::from_min_max(rect.min, rect.max - vec2(if bundled { 70.0 } else { 30.0 }, 0.0));
         let g = ui.painter().layout_no_wrap(name.to_string(), FontId::new(17.0, fam), th.text);
@@ -2114,7 +2393,7 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
     egui::ScrollArea::vertical().max_height(max_h).id_salt("font-list").show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         if q.is_empty() {
-            let rec: Vec<u8> = recent.iter().copied().filter(|i| (*i as usize) < FONT_NAMES.len() && available(*i)).collect();
+            let rec: Vec<u8> = recent.iter().copied().filter(|i| (*i as usize) < total_fonts && available(*i)).collect();
             if !rec.is_empty() {
                 header(ui, "Recently used");
                 for i in rec {
@@ -2126,10 +2405,10 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
         }
         let mut any = false;
         for cat in FontCat::ALL {
-            let mut items: Vec<u8> = (0..FONT_NAMES.len() as u8)
-                .filter(|i| font_category(*i) == cat && available(*i) && (q.is_empty() || FONT_NAMES[*i as usize].to_lowercase().contains(&q)))
+            let mut items: Vec<u8> = (0..total_fonts.min(255) as u8)
+                .filter(|i| font_category(*i) == cat && available(*i) && (q.is_empty() || font_name(*i).to_lowercase().contains(&q)))
                 .collect();
-            items.sort_by_key(|i| FONT_NAMES[*i as usize]);
+            items.sort_by_key(|i| font_name(*i));
             if items.is_empty() {
                 continue;
             }

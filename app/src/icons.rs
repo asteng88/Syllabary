@@ -93,6 +93,7 @@ pub enum Icon {
     Table,
     BuildingBlock,
     Footnote,
+    Image,
 }
 
 #[expect(non_upper_case_globals, reason = "Alias constants match enum variant naming")]
@@ -1091,6 +1092,32 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, fg: Color32, accent: Color32) {
             // Asterisk / footnote reference mark
             line(p, (0.38, 0.42), (0.38, 0.58), ac_bold);
             line(p, (0.30, 0.50), (0.46, 0.50), ac_bold);
+        }
+        Icon::Image => {
+            let frame = Rect::from_min_max(pt(0.12, 0.16), pt(0.88, 0.84));
+            p.rect_filled(frame, 3.0, tint);
+            // Mountain landscape silhouette
+            fill_poly(
+                p,
+                &[(0.14, 0.82), (0.38, 0.50), (0.56, 0.82)],
+                tint_strong,
+                Stroke::NONE,
+            );
+            fill_poly(
+                p,
+                &[(0.48, 0.82), (0.70, 0.56), (0.86, 0.82)],
+                tint_strong,
+                Stroke::NONE,
+            );
+            poly(
+                p,
+                &[(0.15, 0.80), (0.38, 0.50), (0.56, 0.70), (0.70, 0.56), (0.85, 0.80)],
+                ac,
+                false,
+            );
+            // Warm sun disc
+            p.circle_filled(pt(0.66, 0.34), s * 0.085, accent);
+            p.rect_stroke(frame, 3.0, st, egui::StrokeKind::Inside);
         }
     }
 }

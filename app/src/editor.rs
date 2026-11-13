@@ -87,6 +87,15 @@ pub struct Tab {
     pub current_page: usize,
     ctx_pos: Option<Pos>,
     pub versions: Vec<DocVersion>,
+    pub selected_image: Option<u64>,
+    pub selected_image_rect: Option<(u64, usize, Rect)>,
+    pub active_table_cell_rect: Option<(u32, u16, u16, Rect, Rect)>,
+    pub selected_cells: Vec<(u32, u16, u16)>,
+    image_textures: std::collections::HashMap<u64, (usize, egui::TextureHandle)>,
+    resizing_image: Option<(u64, u8, Pos2, f32, f32)>,
+    resizing_table_col: Option<(u32, usize, usize, f32, f32)>,
+    resizing_table_row: Option<(u32, usize, f32, f32)>,
+    drag_cell_anchor: Option<(u32, u16, u16)>,
 }
 
 pub struct ViewOpts<'a> {
@@ -148,6 +157,8 @@ pub enum Cmd {
     NumberList,
     DuplicatePara,
     OpenComments,
+    InsertImage,
+    ImageProps(u64),
 }
 
 impl Tab {
@@ -183,6 +194,15 @@ impl Tab {
             current_page: 0,
             ctx_pos: None,
             versions: vec![initial_ver],
+            selected_image: None,
+            selected_image_rect: None,
+            active_table_cell_rect: None,
+            selected_cells: Vec::new(),
+            image_textures: Default::default(),
+            resizing_image: None,
+            resizing_table_col: None,
+            resizing_table_row: None,
+            drag_cell_anchor: None,
         }
     }
 
@@ -229,6 +249,13 @@ impl Tab {
         self.last_edit_time = now;
     }
     pub fn changed(&mut self) {
+        if let Some(p) = self.doc.paras.get(self.caret.p) {
+            let fmt = p.fmt;
+            if fmt.table_id > 0 {
+                self.doc
+                    .evaluate_table_formulas_live(fmt.table_id, (fmt.table_row as usize, fmt.table_col as usize));
+            }
+        }
         self.rev += 1;
         self.dirty = true;
         self.scroll_to_caret = true;
@@ -409,8 +436,18 @@ impl Tab {
     pub fn enter(&mut self, now: f64) {
         self.checkpoint(EditKind::Other, now);
         self.delete_selection();
-        // Enter on "---" turns it into a horizontal divider line.
+        // Enter on a table formula (e.g. "=SUM(ABOVE)") evaluates the formula immediately in the cell.
         let p_str = self.doc.paras[self.caret.p].string();
+        if self.doc.paras[self.caret.p].fmt.table_id > 0 && p_str.trim_start().starts_with('=') {
+            let tid = self.doc.paras[self.caret.p].fmt.table_id;
+            self.doc.evaluate_table_formulas(tid);
+            let end_c = self.doc.paras.get(self.caret.p).map_or(0, |p| p.len());
+            self.caret = self.doc.clamp(Pos::new(self.caret.p, end_c));
+            self.anchor = self.caret;
+            self.changed();
+            return;
+        }
+        // Enter on "---" turns it into a horizontal divider line.
         if (p_str == "---" || p_str == "***") && self.caret.c == p_str.len() {
             let p = self.caret.p;
             self.doc.delete_range(Pos::new(p, 0), Pos::new(p, p_str.len()));
@@ -439,12 +476,33 @@ impl Tab {
     }
 
     pub fn backspace(&mut self, word: bool, now: f64) {
+        if let Some(img_id) = self.selected_image {
+            self.remove_image(img_id, now);
+            return;
+        }
+        if self.selected_cells.len() > 1 {
+            self.checkpoint(EditKind::Delete, now);
+            let cells = self.selected_cells.clone();
+            let mut tid_eval = 0u32;
+            for (tid, r, c) in cells {
+                tid_eval = tid;
+                self.doc.set_cell_text(tid, r as usize, c as usize, "");
+            }
+            if tid_eval > 0 {
+                self.doc.evaluate_table_formulas(tid_eval);
+            }
+            self.changed();
+            return;
+        }
         self.checkpoint(EditKind::Delete, now);
         if !self.delete_selection() {
             let para = &self.doc.paras[self.caret.p];
-            if self.caret.c == 0 && (para.fmt.list != ListKind::None || para.fmt.indent > 0 || para.fmt.hr) {
+            if self.caret.c == 0 && (para.fmt.list != ListKind::None || para.fmt.indent > 0 || para.fmt.hr || para.fmt.image_id > 0) {
                 let f = &mut self.doc.paras[self.caret.p].fmt;
-                if f.hr {
+                if f.image_id > 0 {
+                    f.image_id = 0;
+                    self.selected_image = None;
+                } else if f.hr {
                     f.hr = false;
                 } else if f.list != ListKind::None {
                     f.list = ListKind::None;
@@ -462,12 +520,70 @@ impl Tab {
     }
 
     pub fn delete_forward(&mut self, word: bool, now: f64) {
+        if let Some(img_id) = self.selected_image {
+            self.remove_image(img_id, now);
+            return;
+        }
+        if self.selected_cells.len() > 1 {
+            self.checkpoint(EditKind::Delete, now);
+            let cells = self.selected_cells.clone();
+            let mut tid_eval = 0u32;
+            for (tid, r, c) in cells {
+                tid_eval = tid;
+                self.doc.set_cell_text(tid, r as usize, c as usize, "");
+            }
+            if tid_eval > 0 {
+                self.doc.evaluate_table_formulas(tid_eval);
+            }
+            self.changed();
+            return;
+        }
         self.checkpoint(EditKind::Delete, now);
         if !self.delete_selection() {
-            let to = if word { self.doc.word_right(self.caret) } else { self.doc.next(self.caret) };
-            self.caret = self.doc.delete_range(self.caret, to);
-            self.anchor = self.caret;
+            if self.caret.c == 0 && self.doc.paras[self.caret.p].fmt.image_id > 0 {
+                self.doc.paras[self.caret.p].fmt.image_id = 0;
+                self.selected_image = None;
+            } else {
+                let to = if word { self.doc.word_right(self.caret) } else { self.doc.next(self.caret) };
+                self.caret = self.doc.delete_range(self.caret, to);
+                self.anchor = self.caret;
+            }
         }
+        self.changed();
+    }
+
+    pub fn insert_image(&mut self, img: DocImage, now: f64) {
+        self.checkpoint(EditKind::Other, now);
+        self.delete_selection();
+        let img_id = img.id;
+        self.doc.images.push(img);
+        if !self.doc.paras[self.caret.p].text.is_empty()
+            || self.doc.paras[self.caret.p].fmt.hr
+            || self.doc.paras[self.caret.p].fmt.image_id > 0
+        {
+            self.caret = self.doc.split(self.caret);
+        }
+        let img_p = self.caret.p;
+        self.doc.paras[img_p].fmt.image_id = img_id;
+        self.doc.paras[img_p].fmt.align = Align::Center;
+        if img_p + 1 == self.doc.paras.len() {
+            self.doc.split(Pos::new(img_p, 0));
+        }
+        self.caret = Pos::new(img_p, 0);
+        self.anchor = self.caret;
+        self.selected_image = Some(img_id);
+        self.changed();
+    }
+
+    pub fn remove_image(&mut self, img_id: u64, now: f64) {
+        self.checkpoint(EditKind::Delete, now);
+        for p in &mut self.doc.paras {
+            if p.fmt.image_id == img_id {
+                p.fmt.image_id = 0;
+            }
+        }
+        self.selected_image = None;
+        self.selected_image_rect = None;
         self.changed();
     }
 
@@ -508,9 +624,22 @@ impl Tab {
         self.pending = None;
     }
 
-    /// Change character formatting of the selection, or of the next typed text.
+    /// Change character formatting of the selection, of all selected table cells, or of the next typed text.
     pub fn apply_char(&mut self, now: f64, f: &dyn Fn(&mut CharStyle)) {
-        if self.has_selection() {
+        if !self.selected_cells.is_empty() && !self.has_selection() {
+            self.checkpoint(EditKind::Other, now);
+            let sel_cells = self.selected_cells.clone();
+            for p in &mut self.doc.paras {
+                if sel_cells.contains(&(p.fmt.table_id, p.fmt.table_row, p.fmt.table_col)) {
+                    for s in &mut p.styles {
+                        f(s);
+                    }
+                    f(&mut p.end_style);
+                }
+            }
+            self.changed();
+            self.scroll_to_caret = false;
+        } else if self.has_selection() {
             self.checkpoint(EditKind::Other, now);
             let (a, b) = self.selection();
             self.doc.restyle(a, b, f);
@@ -536,8 +665,17 @@ impl Tab {
 
     pub fn apply_para(&mut self, now: f64, f: &dyn Fn(&mut ParaFmt)) {
         self.checkpoint(EditKind::Other, now);
-        for p in self.doc.para_range(self.anchor, self.caret) {
-            f(&mut self.doc.paras[p].fmt);
+        if !self.selected_cells.is_empty() && !self.has_selection() {
+            let sel_cells = self.selected_cells.clone();
+            for p in &mut self.doc.paras {
+                if sel_cells.contains(&(p.fmt.table_id, p.fmt.table_row, p.fmt.table_col)) {
+                    f(&mut p.fmt);
+                }
+            }
+        } else {
+            for p in self.doc.para_range(self.anchor, self.caret) {
+                f(&mut self.doc.paras[p].fmt);
+            }
         }
         self.changed();
         self.scroll_to_caret = false;
@@ -631,9 +769,42 @@ impl Tab {
         self.caret = self.doc.clamp(pos);
         if !extend {
             self.anchor = self.caret;
+            self.selected_cells.clear();
         }
         self.pending = None;
         self.scroll_to_caret = true;
+    }
+
+    /// Selects an entire row `row` in `table_id`.
+    pub fn select_table_row(&mut self, table_id: u32, row: usize) {
+        self.selected_cells = self.doc.table_row_cells(table_id, row);
+        if let Some(pi) = self
+            .doc
+            .paras
+            .iter()
+            .position(|p| p.fmt.table_id == table_id && p.fmt.table_row as usize == row)
+        {
+            self.caret = Pos::new(pi, 0);
+            self.anchor = self.caret;
+            self.pending = None;
+            self.scroll_to_caret = false;
+        }
+    }
+
+    /// Selects an entire column `col` in `table_id`.
+    pub fn select_table_col(&mut self, table_id: u32, col: usize) {
+        self.selected_cells = self.doc.table_col_cells(table_id, col);
+        if let Some(pi) = self
+            .doc
+            .paras
+            .iter()
+            .position(|p| p.fmt.table_id == table_id && p.fmt.table_col as usize == col)
+        {
+            self.caret = Pos::new(pi, 0);
+            self.anchor = self.caret;
+            self.pending = None;
+            self.scroll_to_caret = false;
+        }
     }
 
     // ── layout ──────────────────────────────────────────────
@@ -674,16 +845,19 @@ impl Tab {
             }
         }
         let kp = opts.shortcuts;
+        let ctx_img_id = self.doc.paras[pos.p].fmt.image_id;
         resp.context_menu(|ui| {
             crate::chrome::fit_menu(
                 ui,
                 &[
+                    ("Image size & caption…", ""),
                     ("Cut", "Ctrl+X"),
                     ("Copy", "Ctrl+C"),
                     ("Paste", "Ctrl+V"),
                     ("Paste without formatting", kp.paste_plain()),
                     ("Comment", "Ctrl+Alt+M"),
                     ("Insert link", "Ctrl+K"),
+                    ("Insert image from file…", ""),
                     ("Insert smart chip / building block", "@"),
                     ("Define word", kp.dictionary()),
                     ("Select All", "Ctrl+A"),
@@ -691,6 +865,18 @@ impl Tab {
                     ("Capitalization", "▸"),
                 ],
             );
+            if ctx_img_id > 0 {
+                if ui.button(egui::RichText::new("Image size & caption…").strong()).clicked() {
+                    self.selected_image = Some(ctx_img_id);
+                    cmds.push(Cmd::ImageProps(ctx_img_id));
+                    ui.close();
+                }
+                if ui.button("Remove image").clicked() {
+                    self.remove_image(ctx_img_id, now);
+                    ui.close();
+                }
+                ui.separator();
+            }
             if let (Some((a, b, w)), Some(sp)) = (&wrong, opts.speller) {
                 let sugg = sp.suggest(w);
                 if sugg.is_empty() {
@@ -743,6 +929,10 @@ impl Tab {
             }
             if ui.add(egui::Button::new("Insert link").shortcut_text("Ctrl+K")).clicked() {
                 cmds.push(Cmd::Link);
+                ui.close();
+            }
+            if ui.button("Insert image from file…").clicked() {
+                cmds.push(Cmd::InsertImage);
                 ui.close();
             }
             if ui.add(egui::Button::new("Insert smart chip / building block").shortcut_text("@")).clicked() {
@@ -802,22 +992,53 @@ impl Tab {
         let po = lay.page_origin(k, canvas.width());
         let cx = local.x - po.x - lay.content_offset.x;
         let cy = local.y - po.y - lay.content_offset.y;
-        let first = lay.lines.partition_point(|l| l.page < k);
-        let last = lay.lines.partition_point(|l| l.page <= k);
-        let li = if first >= last {
-            // empty page (after a page break) → nearest line before it
-            first.min(lay.lines.len() - 1)
-        } else {
-            let mut best = first;
-            for i in first..last {
-                if lay.lines[i].y <= cy {
-                    best = i;
-                } else {
-                    break;
+
+        // If the click lands inside a table cell on page `k`, prefer lines belonging to that cell
+        let hit_cell = lay
+            .cells
+            .iter()
+            .find(|c| c.page == k && c.rect.contains(pos2(cx, cy)))
+            .map(|c| (c.table_id, c.row, c.col));
+
+        let mut best_li: Option<usize> = None;
+        let mut best_score = (f32::INFINITY, f32::INFINITY);
+        for (i, l) in lay.lines.iter().enumerate() {
+            if l.page != k {
+                continue;
+            }
+            if let Some((tid, r, c)) = hit_cell {
+                let pfmt = self.doc.paras[l.para].fmt;
+                if pfmt.table_id != tid || pfmt.table_row != r || pfmt.table_col != c {
+                    continue;
                 }
             }
-            best
-        };
+            let dy = if cy < l.y {
+                l.y - cy
+            } else if cy > l.y + l.height {
+                cy - (l.y + l.height)
+            } else {
+                0.0
+            };
+            let lx1 = l.x + l.xs.last().copied().unwrap_or(0.0);
+            let dx = if cx < l.x {
+                l.x - cx
+            } else if cx > lx1 {
+                cx - lx1
+            } else {
+                0.0
+            };
+            let score = (dy, dx);
+            if score < best_score {
+                best_score = score;
+                best_li = Some(i);
+            }
+        }
+        let li = best_li.unwrap_or_else(|| {
+            lay.lines
+                .iter()
+                .position(|l| l.page >= k)
+                .unwrap_or(lay.lines.len() - 1)
+        });
         let c = lay.char_at_x(li, cx);
         Pos::new(lay.lines[li].para, c)
     }
@@ -1027,8 +1248,33 @@ impl Tab {
             Key::Enter if !ro => self.enter(now),
             Key::Tab if cmd => cmds.push(Cmd::NextTab),
             Key::Tab if !ro => {
-                let para = &self.doc.paras[self.caret.p];
-                if para.fmt.list != ListKind::None || (self.has_selection() && self.anchor.p != self.caret.p) {
+                let pfmt = self.doc.paras[self.caret.p].fmt;
+                if pfmt.table_id > 0 {
+                    let tid = pfmt.table_id;
+                    let r = pfmt.table_row;
+                    let c = pfmt.table_col;
+                    self.doc.evaluate_table_formulas(tid);
+                    self.rev += 1;
+                    if !shift {
+                        if let Some(next_p) = ((self.caret.p + 1)..self.doc.paras.len())
+                            .find(|&pi| self.doc.paras[pi].fmt.table_id == tid && (self.doc.paras[pi].fmt.table_row != r || self.doc.paras[pi].fmt.table_col != c))
+                        {
+                            self.set_caret(Pos::new(next_p, 0), false);
+                        }
+                    } else if let Some(prev_p) = (0..self.caret.p)
+                        .rev()
+                        .find(|&pi| self.doc.paras[pi].fmt.table_id == tid && (self.doc.paras[pi].fmt.table_row != r || self.doc.paras[pi].fmt.table_col != c))
+                    {
+                        let pr = self.doc.paras[prev_p].fmt.table_row;
+                        let pc = self.doc.paras[prev_p].fmt.table_col;
+                        let first_in_cell = (0..=prev_p)
+                            .rev()
+                            .take_while(|&pi| self.doc.paras[pi].fmt.table_id == tid && self.doc.paras[pi].fmt.table_row == pr && self.doc.paras[pi].fmt.table_col == pc)
+                            .last()
+                            .unwrap_or(prev_p);
+                        self.set_caret(Pos::new(first_in_cell, 0), false);
+                    }
+                } else if pfmt.list != ListKind::None || (self.has_selection() && self.anchor.p != self.caret.p) {
                     self.apply_para(now, &move |f| {
                         if shift {
                             f.indent = f.indent.saturating_sub(1);
@@ -1183,30 +1429,358 @@ impl Tab {
         let th = opts.theme;
         let now = ui.input(|i| i.time);
 
-        // Pre-compute interactive checklist checkbox rects so clicks on a checkbox toggle it directly
+        // Pre-compute interactive checklist checkbox rects & embedded image rects
         let mut checkbox_rects: Vec<(usize, Rect)> = Vec::new();
+        let mut image_rects: Vec<(usize, u64, Rect, Rect)> = Vec::new();
         for l in &lay.lines {
-            if l.first_in_para && self.doc.paras[l.para].fmt.list == ListKind::Checklist {
-                let o = lay.line_origin(l, canvas.min, canvas.width());
-                let content_x = o.x - l.x;
-                let gh = l.galley.rect.height();
-                let box_s = (13.0 * opts.zoom).clamp(10.0, 22.0);
-                let bx = content_x + l.marker_x;
-                let by = o.y + (gh - box_s) * 0.5;
-                checkbox_rects.push((l.para, Rect::from_min_size(pos2(bx, by), vec2(box_s, box_s)).expand(3.0)));
+            if l.first_in_para {
+                let pfmt = self.doc.paras[l.para].fmt;
+                if pfmt.list == ListKind::Checklist {
+                    let o = lay.line_origin(l, canvas.min, canvas.width());
+                    let content_x = o.x - l.x;
+                    let gh = l.galley.rect.height();
+                    let box_s = (13.0 * opts.zoom).clamp(10.0, 22.0);
+                    let bx = content_x + l.marker_x;
+                    let by = o.y + (gh - box_s) * 0.5;
+                    checkbox_rects.push((l.para, Rect::from_min_size(pos2(bx, by), vec2(box_s, box_s)).expand(3.0)));
+                }
+                if pfmt.image_id > 0 {
+                    let o = lay.line_origin(l, canvas.min, canvas.width());
+                    let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
+                    let avail = (lay.content_size.x - indent).max(lay.ppi * 0.8);
+                    if let Some((img_w, img_h, _cap_h, total_h)) = layout::image_box(&self.doc, pfmt.image_id, avail, lay.ppi) {
+                        let pad_top = 4.0 * (lay.ppi / 72.0);
+                        let img_r = Rect::from_min_size(pos2(o.x, o.y + pad_top), vec2(img_w, img_h));
+                        let full_r = Rect::from_min_size(pos2(o.x, o.y), vec2(img_w, total_h));
+                        image_rects.push((l.para, pfmt.image_id, img_r, full_r));
+                    }
+                }
+            }
+        }
+        self.selected_image_rect = self.selected_image.and_then(|sel_id| {
+            image_rects
+                .iter()
+                .find(|(_, id, _, _)| *id == sel_id)
+                .map(|&(pi, id, _, full_r)| (id, pi, full_r))
+        });
+
+        let caret_clamped = self.doc.clamp(self.caret);
+        let caret_fmt = self.doc.paras[caret_clamped.p].fmt;
+        self.active_table_cell_rect = if caret_fmt.table_id > 0 {
+            let tid = caret_fmt.table_id;
+            let crow = caret_fmt.table_row;
+            let ccol = caret_fmt.table_col;
+            lay.cells
+                .iter()
+                .find(|c| c.table_id == tid && c.row == crow && c.col == ccol)
+                .map(|active_c| {
+                    let page_origin = canvas.min + lay.page_origin(active_c.page, canvas.width()).to_vec2() + lay.content_offset;
+                    let cell_r = active_c.rect.translate(page_origin.to_vec2());
+                    let mut tbl_r = cell_r;
+                    for c in lay.cells.iter().filter(|x| x.table_id == tid && x.page == active_c.page) {
+                        tbl_r = tbl_r.union(c.rect.translate(page_origin.to_vec2()));
+                    }
+                    (tid, crow, ccol, cell_r, tbl_r)
+                })
+        } else {
+            None
+        };
+
+        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+        let mut hover_handle: Option<(u64, u8, Pos2)> = None;
+        if opts.mode != DocMode::Viewing {
+            if let Some(hp) = hover_pos {
+                for &(_, img_id, img_r, _) in &image_rects {
+                    if self.selected_image == Some(img_id) || img_r.expand(10.0).contains(hp) {
+                        for (hi, hpt) in image_handle_points(img_r).into_iter().enumerate() {
+                            if Rect::from_center_size(hpt, vec2(12.0, 12.0)).contains(hp) {
+                                hover_handle = Some((img_id, hi as u8, hp));
+                                break;
+                            }
+                        }
+                    }
+                    if hover_handle.is_some() {
+                        break;
+                    }
+                }
             }
         }
 
-        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+        // Pre-compute screen-space table cell rects, border resize edges, and row/column header handles
+        let mut cell_screen_rects: Vec<(u32, u16, u16, Rect)> = Vec::with_capacity(lay.cells.len());
+        for c in &lay.cells {
+            let page_origin = canvas.min + lay.page_origin(c.page, canvas.width()).to_vec2() + lay.content_offset;
+            let cr = c.rect.translate(page_origin.to_vec2());
+            cell_screen_rects.push((c.table_id, c.row, c.col, cr));
+        }
+
+        // Row & Column selector header pills for the active table
+        let mut col_header_rects: Vec<(u32, u16, Rect, String)> = Vec::new();
+        let mut row_header_rects: Vec<(u32, u16, Rect, String)> = Vec::new();
+        if let Some((active_tid, _, _, _, tbl_r)) = self.active_table_cell_rect {
+            // Column headers along the top of the table (from row 0 cells, or first visible row on this page)
+            let min_row = cell_screen_rects
+                .iter()
+                .filter(|(t, _, _, _)| *t == active_tid)
+                .map(|(_, r, _, _)| *r)
+                .min()
+                .unwrap_or(0);
+            for &(t, r, c, cr) in &cell_screen_rects {
+                if t == active_tid && r == min_row {
+                    let hr = Rect::from_min_max(pos2(cr.min.x + 0.5, tbl_r.min.y - 16.0), pos2(cr.max.x - 0.5, tbl_r.min.y - 2.0));
+                    let mut col_idx = c as usize;
+                    let mut lbl = String::new();
+                    loop {
+                        lbl.insert(0, (b'A' + (col_idx % 26) as u8) as char);
+                        if col_idx < 26 {
+                            break;
+                        }
+                        col_idx = col_idx / 26 - 1;
+                    }
+                    col_header_rects.push((t, c, hr, lbl));
+                }
+            }
+            // Row headers along the left of the table (from col 0 cells)
+            for &(t, r, c, cr) in &cell_screen_rects {
+                if t == active_tid && c == 0 {
+                    let hr = Rect::from_min_max(pos2(tbl_r.min.x - 19.0, cr.min.y + 0.5), pos2(tbl_r.min.x - 2.0, cr.max.y - 0.5));
+                    row_header_rects.push((t, r, hr, format!("{}", r + 1)));
+                }
+            }
+        }
+
+        // Detect hover over table column border (vertical edge) or row border (horizontal edge), or row/column header
+        let mut hover_col_edge: Option<(u32, usize, usize, f32, f32, f32)> = None; // (tid, row, col, x_screen, y0, y1)
+        let mut hover_row_edge: Option<(u32, usize, f32, f32, f32)> = None; // (tid, row, y_screen, x0, x1)
+        let mut hover_col_hdr: Option<(u32, usize)> = None;
+        let mut hover_row_hdr: Option<(u32, usize)> = None;
+        if opts.mode != DocMode::Viewing && hover_handle.is_none() && self.resizing_image.is_none() {
+            if let Some(hp) = hover_pos {
+                for &(t, c, hr, _) in &col_header_rects {
+                    if hr.expand(1.5).contains(hp) {
+                        hover_col_hdr = Some((t, c as usize));
+                        break;
+                    }
+                }
+                if hover_col_hdr.is_none() {
+                    for &(t, r, hr, _) in &row_header_rects {
+                        if hr.expand(1.5).contains(hp) {
+                            hover_row_hdr = Some((t, r as usize));
+                            break;
+                        }
+                    }
+                }
+                if hover_col_hdr.is_none() && hover_row_hdr.is_none() {
+                    let tol = 5.0_f32;
+                    for &(t, r, c, cr) in &cell_screen_rects {
+                        if hp.y >= cr.min.y - 2.0 && hp.y <= cr.max.y + 2.0 && (hp.x - cr.max.x).abs() <= tol {
+                            let mut y0 = cr.min.y;
+                            let mut y1 = cr.max.y;
+                            for &(t2, _, _, cr2) in &cell_screen_rects {
+                                if t2 == t && (cr2.max.x - cr.max.x).abs() < 2.0 {
+                                    y0 = y0.min(cr2.min.y);
+                                    y1 = y1.max(cr2.max.y);
+                                }
+                            }
+                            hover_col_edge = Some((t, r as usize, c as usize, cr.max.x, y0, y1));
+                            break;
+                        }
+                        if hp.x >= cr.min.x - 2.0 && hp.x <= cr.max.x + 2.0 && (hp.y - cr.max.y).abs() <= tol {
+                            let mut x0 = cr.min.x;
+                            let mut x1 = cr.max.x;
+                            for &(t2, r2, _, cr2) in &cell_screen_rects {
+                                if t2 == t && r2 == r {
+                                    x0 = x0.min(cr2.min.x);
+                                    x1 = x1.max(cr2.max.x);
+                                }
+                            }
+                            hover_row_edge = Some((t, r as usize, cr.max.y, x0, x1));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Double-click on a cell's right border -> auto-size column width to contents!
+        // Double-click on a cell's bottom border -> auto-size row height to contents!
+        let mut handled_table_edge = false;
+        if opts.mode != DocMode::Viewing && resp.double_clicked() {
+            if let Some((tid, r_idx, c_idx, ..)) = hover_col_edge {
+                if let Some(auto_w) = layout::measure_column_autofit_width_in(ui.ctx(), &self.doc, opts.book, tid, r_idx, c_idx) {
+                    self.checkpoint(EditKind::Other, now);
+                    self.doc.table_resize_col(tid, r_idx, c_idx, auto_w);
+                    self.resizing_table_col = None;
+                    self.changed();
+                    self.scroll_to_caret = false;
+                    handled_table_edge = true;
+                }
+            } else if let Some((tid, r_idx, ..)) = hover_row_edge {
+                if let Some(auto_h_pt) = layout::measure_row_autofit_height_pt(ui.ctx(), &self.doc, opts.book, tid, r_idx) {
+                    self.checkpoint(EditKind::Other, now);
+                    self.doc.table_resize_row(tid, r_idx, auto_h_pt);
+                    self.resizing_table_row = None;
+                    self.changed();
+                    self.scroll_to_caret = false;
+                    handled_table_edge = true;
+                }
+            }
+        }
+
+        // Start or continue dragging a table column border or row border
+        if !handled_table_edge
+            && self.resizing_image.is_none()
+            && self.resizing_table_col.is_none()
+            && self.resizing_table_row.is_none()
+            && opts.mode != DocMode::Viewing
+            && (ui.input(|i| i.pointer.primary_pressed()) || resp.drag_started())
+        {
+            if let Some(hp) = hover_pos {
+                if let Some((tid, r_idx, c_idx, ..)) = hover_col_edge {
+                    let start_w = self
+                        .doc
+                        .table(tid)
+                        .and_then(|t| t.rows.get(r_idx))
+                        .and_then(|r| r.cells.get(c_idx))
+                        .map_or(1.5, |c| c.width_in);
+                    self.checkpoint(EditKind::Other, now);
+                    self.resizing_table_col = Some((tid, r_idx, c_idx, hp.x, start_w));
+                    handled_table_edge = true;
+                } else if let Some((tid, r_idx, ..)) = hover_row_edge {
+                    let pt = lay.ppi / 72.0;
+                    let start_h_pt = cell_screen_rects
+                        .iter()
+                        .find(|(t, r, _, _)| *t == tid && *r as usize == r_idx)
+                        .map_or(24.0, |(_, _, _, cr)| cr.height() / pt.max(0.1));
+                    self.checkpoint(EditKind::Other, now);
+                    self.resizing_table_row = Some((tid, r_idx, hp.y, start_h_pt));
+                    handled_table_edge = true;
+                }
+            }
+        }
+        if let Some((tid, r_idx, c_idx, start_x, start_w)) = self.resizing_table_col {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                    let dx_in = (cur_pt.x - start_x) / lay.ppi.max(1.0);
+                    let max_w_in = (self.doc.page.width - self.doc.page.margin_left - self.doc.page.margin_right).max(1.0);
+                    let new_w = (start_w + dx_in).clamp(0.4, max_w_in);
+                    self.doc.table_resize_col(tid, r_idx, c_idx, new_w);
+                    self.rev += 1;
+                    self.dirty = true;
+                }
+                handled_table_edge = true;
+            } else {
+                self.resizing_table_col = None;
+            }
+        }
+        if let Some((tid, r_idx, start_y, start_h_pt)) = self.resizing_table_row {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                    let pt = (lay.ppi / 72.0).max(0.1);
+                    let dy_pt = (cur_pt.y - start_y) / pt;
+                    let new_h_pt = (start_h_pt + dy_pt).clamp(12.0, 600.0);
+                    self.doc.table_resize_row(tid, r_idx, new_h_pt);
+                    self.rev += 1;
+                    self.dirty = true;
+                }
+                handled_table_edge = true;
+            } else {
+                self.resizing_table_row = None;
+            }
+        }
+
+        // Clicking a column header pill or row header pill selects the entire column or row!
+        let mut clicked_table_hdr = false;
+        if !handled_table_edge && self.resizing_image.is_none() && (resp.clicked() || ui.input(|i| i.pointer.primary_pressed())) {
+            if let Some((tid, col_idx)) = hover_col_hdr {
+                self.select_table_col(tid, col_idx);
+                clicked_table_hdr = true;
+            } else if let Some((tid, row_idx)) = hover_row_hdr {
+                self.select_table_row(tid, row_idx);
+                clicked_table_hdr = true;
+            }
+        }
+
+        // Start or continue dragging an image resize handle
+        if self.resizing_image.is_none()
+            && opts.mode != DocMode::Viewing
+            && (ui.input(|i| i.pointer.primary_pressed()) || resp.drag_started())
+        {
+            if let Some((img_id, hi, start_pt)) = hover_handle {
+                if let Some(img) = self.doc.image(img_id) {
+                    let (w0, h0) = (img.width_in, img.height_in);
+                    self.checkpoint(EditKind::Other, now);
+                    self.selected_image = Some(img_id);
+                    self.resizing_image = Some((img_id, hi, start_pt, w0, h0));
+                }
+            }
+        }
+        if let Some((img_id, hi, start_pt, w0, h0)) = self.resizing_image {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                    let dx_in = (cur_pt.x - start_pt.x) / lay.ppi.max(1.0);
+                    let dy_in = (cur_pt.y - start_pt.y) / lay.ppi.max(1.0);
+                    let max_w_in = (self.doc.page.width - self.doc.page.margin_left - self.doc.page.margin_right).max(1.0);
+                    let aspect = (w0 / h0.max(0.05)).max(0.05);
+                    let (new_w, new_h) = match hi {
+                        0 => {
+                            let nw = (w0 - dx_in).clamp(0.5, max_w_in);
+                            (nw, (nw / aspect).clamp(0.4, 20.0))
+                        }
+                        1 => {
+                            let nw = (w0 + dx_in).clamp(0.5, max_w_in);
+                            (nw, (nw / aspect).clamp(0.4, 20.0))
+                        }
+                        2 => {
+                            let nw = (w0 + dx_in).clamp(0.5, max_w_in);
+                            (nw, (nw / aspect).clamp(0.4, 20.0))
+                        }
+                        3 => {
+                            let nw = (w0 - dx_in).clamp(0.5, max_w_in);
+                            (nw, (nw / aspect).clamp(0.4, 20.0))
+                        }
+                        4 => (w0, (h0 - dy_in).clamp(0.4, 20.0)),
+                        5 => (w0, (h0 + dy_in).clamp(0.4, 20.0)),
+                        6 => ((w0 - dx_in).clamp(0.5, max_w_in), h0),
+                        _ => ((w0 + dx_in).clamp(0.5, max_w_in), h0),
+                    };
+                    if let Some(img) = self.doc.image_mut(img_id) {
+                        if (img.width_in - new_w).abs() > 0.005 || (img.height_in - new_h).abs() > 0.005 {
+                            img.width_in = new_w;
+                            img.height_in = new_h;
+                            self.rev += 1;
+                            self.dirty = true;
+                        }
+                    }
+                }
+            } else {
+                self.resizing_image = None;
+            }
+        }
+
         let over_checkbox = hover_pos.is_some_and(|hp| checkbox_rects.iter().any(|(_, r)| r.contains(hp)));
-        let resp = resp.on_hover_cursor(if over_checkbox { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Text });
+        let over_image = hover_pos.is_some_and(|hp| image_rects.iter().any(|(_, _, _, fr)| fr.contains(hp)));
+        let cursor_icon = if let Some((_, hi, ..)) = self.resizing_image {
+            handle_cursor(hi)
+        } else if let Some((_, hi, _)) = hover_handle {
+            handle_cursor(hi)
+        } else if self.resizing_table_col.is_some() || hover_col_edge.is_some() {
+            egui::CursorIcon::ResizeHorizontal
+        } else if self.resizing_table_row.is_some() || hover_row_edge.is_some() {
+            egui::CursorIcon::ResizeVertical
+        } else if hover_col_hdr.is_some() || hover_row_hdr.is_some() || over_checkbox || over_image {
+            egui::CursorIcon::PointingHand
+        } else {
+            egui::CursorIcon::Text
+        };
+        let resp = resp.on_hover_cursor(cursor_icon);
 
         // mouse
         if resp.clicked() || resp.drag_started() || resp.double_clicked() || resp.triple_clicked() {
             ui.memory_mut(|m| m.request_focus(focus_id));
         }
         let mut toggled_checkbox = false;
-        if resp.clicked() && opts.mode != DocMode::Viewing {
+        if resp.clicked() && opts.mode != DocMode::Viewing && self.resizing_image.is_none() {
             if let Some(pp) = resp.interact_pointer_pos() {
                 if let Some((pi, _)) = checkbox_rects.iter().find(|(_, r)| r.contains(pp)) {
                     self.checkpoint(EditKind::Other, now);
@@ -1217,28 +1791,84 @@ impl Tab {
                 }
             }
         }
-        if !toggled_checkbox {
+        let mut clicked_image = false;
+        if !toggled_checkbox && self.resizing_image.is_none() && hover_handle.is_none() {
+            if let Some(pp) = resp.interact_pointer_pos() {
+                if let Some(&(pi, img_id, _, _)) = image_rects.iter().find(|(_, _, _, fr)| fr.expand(4.0).contains(pp)) {
+                    if resp.clicked() || resp.double_clicked() || ui.input(|i| i.pointer.primary_pressed()) {
+                        self.selected_image = Some(img_id);
+                        self.caret = Pos::new(pi, 0);
+                        self.anchor = self.caret;
+                        self.scroll_to_caret = false;
+                        if resp.double_clicked() {
+                            cmds.push(Cmd::ImageProps(img_id));
+                        }
+                        clicked_image = true;
+                    }
+                } else if ui.input(|i| i.pointer.primary_pressed()) || resp.clicked() {
+                    self.selected_image = None;
+                }
+            }
+        }
+        if !toggled_checkbox
+            && !clicked_image
+            && !handled_table_edge
+            && !clicked_table_hdr
+            && self.resizing_image.is_none()
+            && self.resizing_table_col.is_none()
+            && self.resizing_table_row.is_none()
+        {
             if let Some(pp) = resp.interact_pointer_pos() {
                 ui.memory_mut(|m| m.request_focus(focus_id));
                 self.last_edit_time = now;
                 let pos = self.hit(&lay, canvas, pp);
                 let shift = ui.input(|i| i.modifiers.shift);
+                let hit_cell_coord = cell_screen_rects
+                    .iter()
+                    .find(|(_, _, _, cr)| cr.contains(pp))
+                    .map(|&(t, r, c, _)| (t, r, c));
                 if resp.triple_clicked() {
                     self.anchor = Pos::new(pos.p, 0);
                     self.caret = Pos::new(pos.p, self.doc.paras[pos.p].len());
+                    self.selected_cells.clear();
                 } else if resp.double_clicked() {
                     let (a, b) = self.doc.word_at(pos);
                     self.anchor = a;
                     self.caret = b;
+                    self.selected_cells.clear();
                 } else if ui.input(|i| i.pointer.primary_pressed()) {
                     self.set_caret(pos, shift);
+                    self.drag_cell_anchor = hit_cell_coord;
                 } else if resp.dragged() {
-                    self.caret = pos;
-                    self.pending = None;
+                    if let (Some((t0, r0, c0)), Some((t1, r1, c1))) = (self.drag_cell_anchor, hit_cell_coord) {
+                        if t0 == t1 && (r0 != r1 || c0 != c1) {
+                            let mut sel = Vec::new();
+                            for r in r0.min(r1)..=r0.max(r1) {
+                                for c in c0.min(c1)..=c0.max(c1) {
+                                    sel.push((t0, r, c));
+                                }
+                            }
+                            self.selected_cells = sel;
+                            self.caret = pos;
+                            self.anchor = pos;
+                            self.pending = None;
+                        } else {
+                            self.selected_cells.clear();
+                            self.caret = pos;
+                            self.pending = None;
+                        }
+                    } else {
+                        self.selected_cells.clear();
+                        self.caret = pos;
+                        self.pending = None;
+                    }
                 }
                 self.desired_x = None;
                 self.scroll_to_caret = false;
             }
+        }
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.drag_cell_anchor = None;
         }
 
         // right click: move the caret there unless it lands inside the selection
@@ -1290,10 +1920,30 @@ impl Tab {
                 }
             }
             if opts.header_footer && !lay.draft {
-                let hf = egui::FontId::new(10.0 * lay.ppi / 72.0, egui::FontFamily::Proportional);
-                let gray = Color32::from_gray(110);
+                let pt = lay.ppi / 72.0;
                 if !self.doc.header.is_empty() {
-                    painter.text(pos2(r.center().x, r.min.y + lay.content_offset.y * 0.5), egui::Align2::CENTER_CENTER, &self.doc.header, hf.clone(), gray);
+                    let (fam, fake_it) = opts.book.family(0, false, self.doc.header_italic);
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        &self.doc.header,
+                        0.0,
+                        egui::text::TextFormat {
+                            font_id: egui::FontId::new(10.0 * pt, fam),
+                            color: Color32::from_gray(95),
+                            italics: fake_it,
+                            ..Default::default()
+                        },
+                    );
+                    let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                    let gw = gal.rect.width();
+                    let gh = gal.rect.height();
+                    let hx = match self.doc.header_align {
+                        Align::Left | Align::Justify => content.min.x,
+                        Align::Center => content.center().x - gw * 0.5,
+                        Align::Right => (content.max.x - gw).max(content.min.x),
+                    };
+                    let hy = r.min.y + (lay.content_offset.y * 0.5 - gh * 0.5).max(3.0 * opts.zoom);
+                    painter.galley(pos2(hx, hy), gal, Color32::BLACK);
                 }
                 let mut foot = self.doc.footer.clone();
                 if self.doc.page.page_numbers {
@@ -1301,7 +1951,85 @@ impl Tab {
                     foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
                 }
                 if !foot.is_empty() {
-                    painter.text(pos2(r.center().x, r.max.y - (lay.page_size.y - lay.content_offset.y - lay.content_size.y) * 0.5), egui::Align2::CENTER_CENTER, foot, hf, gray);
+                    let (fam, fake_it) = opts.book.family(0, false, self.doc.footer_italic);
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        &foot,
+                        0.0,
+                        egui::text::TextFormat {
+                            font_id: egui::FontId::new(10.0 * pt, fam),
+                            color: Color32::from_gray(95),
+                            italics: fake_it,
+                            ..Default::default()
+                        },
+                    );
+                    let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                    let gw = gal.rect.width();
+                    let gh = gal.rect.height();
+                    let fx = match self.doc.footer_align {
+                        Align::Left | Align::Justify => content.min.x,
+                        Align::Center => content.center().x - gw * 0.5,
+                        Align::Right => (content.max.x - gw).max(content.min.x),
+                    };
+                    let bot_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y).max(gh + 4.0);
+                    let fy = r.max.y - (bot_margin * 0.5 + gh * 0.5).max(gh + 2.0 * opts.zoom);
+                    painter.galley(pos2(fx, fy), gal, Color32::BLACK);
+                }
+            }
+
+            // Table cells: background shading first, multi-cell selection highlight, then crisp borders
+            let pt = lay.ppi / 72.0;
+            for cell in lay.cells.iter().filter(|c| c.page == k) {
+                let cr = cell.rect.translate(content.min.to_vec2());
+                if let Some(rgb) = cell.shading {
+                    painter.rect_filled(cr, 0.0, layout::color(rgb));
+                }
+                if self.selected_cells.contains(&(cell.table_id, cell.row, cell.col)) {
+                    painter.rect_filled(cr, 0.0, th.accent.gamma_multiply(0.18));
+                    painter.rect_stroke(cr, 0.0, Stroke::new(1.5, th.accent), StrokeKind::Inside);
+                }
+            }
+            for cell in lay.cells.iter().filter(|c| c.page == k) {
+                let cr = cell.rect.translate(content.min.to_vec2());
+                if let Some(b) = cell.borders.top {
+                    if b.width_pt > 0.0 {
+                        let w = (b.width_pt * pt).max(1.0);
+                        painter.line_segment([cr.left_top(), cr.right_top()], Stroke::new(w, layout::color(b.color)));
+                    }
+                }
+                if let Some(b) = cell.borders.bottom {
+                    if b.width_pt > 0.0 {
+                        let w = (b.width_pt * pt).max(1.0);
+                        painter.line_segment([cr.left_bottom(), cr.right_bottom()], Stroke::new(w, layout::color(b.color)));
+                    }
+                }
+                if let Some(b) = cell.borders.left {
+                    if b.width_pt > 0.0 {
+                        let w = (b.width_pt * pt).max(1.0);
+                        painter.line_segment([cr.left_top(), cr.left_bottom()], Stroke::new(w, layout::color(b.color)));
+                    }
+                }
+                if let Some(b) = cell.borders.right {
+                    if b.width_pt > 0.0 {
+                        let w = (b.width_pt * pt).max(1.0);
+                        painter.line_segment([cr.right_top(), cr.right_bottom()], Stroke::new(w, layout::color(b.color)));
+                    }
+                }
+                if self
+                    .doc
+                    .table(cell.table_id)
+                    .and_then(|t| t.rows.get(cell.row as usize))
+                    .and_then(|r| r.cells.get(cell.col as usize))
+                    .and_then(|cs| cs.formula.as_ref())
+                    .is_some()
+                {
+                    painter.text(
+                        pos2(cr.max.x - 3.0 * opts.zoom, cr.min.y + 2.0 * opts.zoom),
+                        egui::Align2::RIGHT_TOP,
+                        "∑",
+                        egui::FontId::proportional((8.5 * opts.zoom).clamp(7.0, 13.0)),
+                        th.accent.gamma_multiply(0.75),
+                    );
                 }
             }
         }
@@ -1361,6 +2089,96 @@ impl Tab {
             if pfmt.hr && l.first_in_para {
                 let y_mid = o.y + l.height * 0.5;
                 painter.line_segment([pos2(content_x, y_mid), pos2(content_x + lay.content_size.x, y_mid)], Stroke::new(1.5, Color32::from_gray(185)));
+            }
+
+            // Embedded image block + caption + interactive resize handles
+            if pfmt.image_id > 0 && l.first_in_para {
+                let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
+                let avail = (lay.content_size.x - indent).max(lay.ppi * 0.8);
+                if let Some((img_w, img_h, _cap_h, total_h)) = layout::image_box(&self.doc, pfmt.image_id, avail, lay.ppi) {
+                    let scale = lay.ppi / 72.0;
+                    let pad_top = 4.0 * scale;
+                    let img_r = Rect::from_min_size(pos2(o.x, o.y + pad_top), vec2(img_w, img_h));
+                    let full_r = Rect::from_min_size(pos2(o.x, o.y), vec2(img_w, total_h));
+                    let tex_opt = if let Some(doc_img) = self.doc.image(pfmt.image_id) {
+                        let b64_len = doc_img.png_b64.len();
+                        let needs_load = self.image_textures.get(&pfmt.image_id).is_none_or(|(len, _)| *len != b64_len);
+                        if needs_load {
+                            if let Some((w, h, rgba)) = doc_img.decode_rgba() {
+                                let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                                let handle = ui.ctx().load_texture(
+                                    format!("doc-img-{}-{b64_len}", pfmt.image_id),
+                                    cimg,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.image_textures.insert(pfmt.image_id, (b64_len, handle));
+                            }
+                        }
+                        self.image_textures.get(&pfmt.image_id).map(|(_, h)| h.id())
+                    } else {
+                        None
+                    };
+                    painter.rect_filled(img_r.translate(vec2(0.0, 1.5)).expand(1.0), 4.0, Color32::from_black_alpha(16));
+                    if let Some(tid) = tex_opt {
+                        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                        painter.image(tid, img_r, uv, Color32::WHITE);
+                    } else {
+                        painter.rect_filled(img_r, 4.0, Color32::from_gray(235));
+                    }
+                    painter.rect_stroke(img_r, 3.0, Stroke::new(1.0, Color32::from_black_alpha(28)), StrokeKind::Inside);
+
+                    let is_sel = self.selected_image == Some(pfmt.image_id);
+                    let is_hov = hover_pos.is_some_and(|hp| full_r.expand(4.0).contains(hp));
+                    if let Some(doc_img) = self.doc.image(pfmt.image_id) {
+                        if !doc_img.caption.is_empty() {
+                            let cap_font = egui::FontId::new((10.0 * scale).max(8.5), egui::FontFamily::Proportional);
+                            let cap_y = img_r.max.y + 5.0 * scale;
+                            painter.text(
+                                pos2(img_r.center().x, cap_y),
+                                egui::Align2::CENTER_TOP,
+                                &doc_img.caption,
+                                cap_font,
+                                Color32::from_rgb(78, 86, 102),
+                            );
+                        } else if is_sel || is_hov {
+                            let cap_font = egui::FontId::new((9.5 * scale).max(8.5), egui::FontFamily::Proportional);
+                            let cap_y = img_r.max.y + 4.0 * scale;
+                            painter.text(
+                                pos2(img_r.center().x, cap_y),
+                                egui::Align2::CENTER_TOP,
+                                "+ Add a caption in the bar below (or double-click image)…",
+                                cap_font,
+                                th.accent.gamma_multiply(0.85),
+                            );
+                        }
+                        if is_sel || is_hov || self.resizing_image.is_some_and(|(id, ..)| id == pfmt.image_id) {
+                            let stroke_w = if is_sel { 2.0 } else { 1.2 };
+                            painter.rect_stroke(img_r, 2.0, Stroke::new(stroke_w, th.accent), StrokeKind::Outside);
+                            for (hi, hpt) in image_handle_points(img_r).into_iter().enumerate() {
+                                let hr = Rect::from_center_size(hpt, vec2(8.5, 8.5));
+                                let active_h = self.resizing_image.is_some_and(|(id, idx, ..)| id == pfmt.image_id && idx == hi as u8)
+                                    || hover_handle.is_some_and(|(id, idx, _)| id == pfmt.image_id && idx == hi as u8);
+                                painter.rect_filled(hr, 2.0, if active_h { th.accent } else { Color32::WHITE });
+                                painter.rect_stroke(hr, 2.0, Stroke::new(1.5, th.accent), StrokeKind::Inside);
+                            }
+                            if is_sel || self.resizing_image.is_some_and(|(id, ..)| id == pfmt.image_id) {
+                                let dim_txt = format!("{:.2} × {:.2} in", doc_img.width_in, doc_img.height_in);
+                                let badge_rect = Rect::from_min_size(
+                                    pos2((img_r.max.x - 94.0).max(img_r.min.x + 4.0), (img_r.max.y - 24.0).max(img_r.min.y + 4.0)),
+                                    vec2(88.0, 18.0),
+                                );
+                                painter.rect_filled(badge_rect, 4.0, Color32::from_black_alpha(175));
+                                painter.text(
+                                    badge_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    dim_txt,
+                                    egui::FontId::proportional(10.5),
+                                    Color32::WHITE,
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             // Active comment highlights on this paragraph
@@ -1449,7 +2267,25 @@ impl Tab {
                     }
                 }
             }
-            painter.galley(o, l.galley.clone(), Color32::BLACK);
+            if pfmt.table_id > 0 {
+                if let Some(cell) = lay
+                    .cells
+                    .iter()
+                    .find(|c| c.table_id == pfmt.table_id && c.row == pfmt.table_row && c.col == pfmt.table_col && c.page == l.page)
+                {
+                    if !cell.wrap_text {
+                        let page_origin = canvas.min + lay.page_origin(l.page, canvas.width()).to_vec2() + lay.content_offset;
+                        let cell_cr = cell.rect.translate(page_origin.to_vec2()).intersect(clip);
+                        painter.with_clip_rect(cell_cr).galley(o, l.galley.clone(), Color32::BLACK);
+                    } else {
+                        painter.galley(o, l.galley.clone(), Color32::BLACK);
+                    }
+                } else {
+                    painter.galley(o, l.galley.clone(), Color32::BLACK);
+                }
+            } else {
+                painter.galley(o, l.galley.clone(), Color32::BLACK);
+            }
             if let Some(sp) = opts.speller {
                 let errs = spell_cache.entry(l.para).or_insert_with(|| self.spell_errors(sp, l.para));
                 for &(a, b) in errs.iter() {
@@ -1493,10 +2329,98 @@ impl Tab {
             self.current_page = l.page;
         }
 
+        // Paint active table row/column selection headers & resize edge highlight guides
+        if opts.mode != DocMode::Viewing {
+            for &(t, c, hr, ref lbl) in &col_header_rects {
+                let col_sel = !self.selected_cells.is_empty()
+                    && self
+                        .selected_cells
+                        .iter()
+                        .all(|&(st, _, sc)| st == t && sc == c)
+                    && self.selected_cells.len() >= self.doc.table(t).map_or(1, |tb| tb.rows.len());
+                let hov = hover_col_hdr == Some((t, c as usize));
+                let bg = if col_sel || hov { th.accent } else { th.surface_elevated };
+                let fg = if col_sel || hov { Color32::WHITE } else { th.subtle };
+                painter.rect_filled(hr, 3.0, bg);
+                painter.rect_stroke(hr, 3.0, Stroke::new(1.0, if col_sel || hov { th.accent } else { th.border }), StrokeKind::Inside);
+                painter.text(hr.center(), egui::Align2::CENTER_CENTER, lbl, egui::FontId::proportional(9.5), fg);
+            }
+            for &(t, r, hr, ref lbl) in &row_header_rects {
+                let row_sel = !self.selected_cells.is_empty()
+                    && self
+                        .selected_cells
+                        .iter()
+                        .all(|&(st, sr, _)| st == t && sr == r)
+                    && self.selected_cells.len()
+                        >= self
+                            .doc
+                            .table(t)
+                            .and_then(|tb| tb.rows.get(r as usize))
+                            .map_or(1, |rw| rw.cells.len());
+                let hov = hover_row_hdr == Some((t, r as usize));
+                let bg = if row_sel || hov { th.accent } else { th.surface_elevated };
+                let fg = if row_sel || hov { Color32::WHITE } else { th.subtle };
+                painter.rect_filled(hr, 3.0, bg);
+                painter.rect_stroke(hr, 3.0, Stroke::new(1.0, if row_sel || hov { th.accent } else { th.border }), StrokeKind::Inside);
+                painter.text(hr.center(), egui::Align2::CENTER_CENTER, lbl, egui::FontId::proportional(9.5), fg);
+            }
+            if let Some((_, _, _, x_scr, y0, y1)) = hover_col_edge {
+                painter.line_segment([pos2(x_scr, y0), pos2(x_scr, y1)], Stroke::new(2.4, th.accent));
+            }
+            if let Some((_, _, y_scr, x0, x1)) = hover_row_edge {
+                painter.line_segment([pos2(x0, y_scr), pos2(x1, y_scr)], Stroke::new(2.4, th.accent));
+            }
+            if let Some((tid, r_idx, c_idx, ..)) = self.resizing_table_col {
+                if let Some(&(_, _, _, cr)) = cell_screen_rects
+                    .iter()
+                    .find(|&&(t, r, c, _)| t == tid && r as usize == r_idx && c as usize == c_idx)
+                {
+                    painter.line_segment([pos2(cr.max.x, cr.min.y - 8.0), pos2(cr.max.x, cr.max.y + 8.0)], Stroke::new(2.4, th.accent));
+                    let w_in = self
+                        .doc
+                        .table(tid)
+                        .and_then(|tb| tb.rows.get(r_idx))
+                        .and_then(|rw| rw.cells.get(c_idx))
+                        .map_or(1.0, |cs| cs.width_in);
+                    let badge = Rect::from_center_size(pos2(cr.max.x, cr.min.y - 12.0), vec2(58.0, 17.0));
+                    painter.rect_filled(badge, 4.0, Color32::from_black_alpha(185));
+                    painter.text(
+                        badge.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{w_in:.2} in"),
+                        egui::FontId::proportional(10.0),
+                        Color32::WHITE,
+                    );
+                }
+            }
+            if let Some((tid, r_idx, ..)) = self.resizing_table_row {
+                if let Some(&(_, _, _, cr)) = cell_screen_rects
+                    .iter()
+                    .find(|&&(t, r, _, _)| t == tid && r as usize == r_idx)
+                {
+                    painter.line_segment([pos2(cr.min.x - 8.0, cr.max.y), pos2(cr.max.x + 8.0, cr.max.y)], Stroke::new(2.4, th.accent));
+                    let h_pt = self
+                        .doc
+                        .table(tid)
+                        .and_then(|tb| tb.rows.get(r_idx))
+                        .map_or(0.0, |rw| rw.min_height_pt);
+                    let badge = Rect::from_center_size(pos2(cr.max.x + 34.0, cr.max.y), vec2(58.0, 17.0));
+                    painter.rect_filled(badge, 4.0, Color32::from_black_alpha(185));
+                    painter.text(
+                        badge.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{h_pt:.0} pt"),
+                        egui::FontId::proportional(10.0),
+                        Color32::WHITE,
+                    );
+                }
+            }
+        }
+
         // caret
         let focused = ui.memory(|m| m.has_focus(focus_id) || m.focused().is_none());
         if let Some(cr) = caret_rect {
-            if focused && opts.mode != DocMode::Viewing {
+            if focused && opts.mode != DocMode::Viewing && self.selected_image.is_none() {
                 let t = ui.input(|i| i.time);
                 let since = (t - self.last_edit_time.min(t)).max(0.0);
                 let on_duration = 0.53_f32;
@@ -1555,6 +2479,28 @@ fn squiggle(p: &egui::Painter, x0: f32, x1: f32, y: f32) {
     }
     if pts.len() >= 2 {
         p.add(egui::Shape::line(pts, Stroke::new(1.0, col)));
+    }
+}
+
+fn image_handle_points(r: Rect) -> [Pos2; 8] {
+    [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+        pos2(r.center().x, r.min.y),
+        pos2(r.center().x, r.max.y),
+        pos2(r.min.x, r.center().y),
+        pos2(r.max.x, r.center().y),
+    ]
+}
+
+fn handle_cursor(idx: u8) -> egui::CursorIcon {
+    match idx {
+        0 | 2 => egui::CursorIcon::ResizeNwSe,
+        1 | 3 => egui::CursorIcon::ResizeNeSw,
+        4 | 5 => egui::CursorIcon::ResizeVertical,
+        _ => egui::CursorIcon::ResizeHorizontal,
     }
 }
 
@@ -1726,5 +2672,38 @@ mod tests {
             assert!(y0 < ink_top && y1 > ink_bot, "Expected equal padding above {ink_top} ({y0}) and below {ink_bot} ({y1})");
         });
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn image_insert_resize_caption_and_roundtrip() {
+        let mut raw_png = Vec::new();
+        let rgba = image::RgbaImage::from_pixel(40, 20, image::Rgba([43, 87, 151, 255]));
+        image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut raw_png), image::ImageFormat::Png)
+            .expect("encode test png");
+
+        let img = DocImage::from_file_bytes(1, "diagram.png".into(), &raw_png, 6.5).expect("decode test png");
+        assert_eq!(img.natural_size, [40, 20]);
+        assert!((img.aspect_ratio() - 2.0).abs() < 0.01);
+
+        let mut t = Tab::new(1, "Untitled1".into(), Document::default());
+        t.insert_image(img, 1.0);
+        assert_eq!(t.selected_image, Some(1));
+        assert_eq!(t.doc.paras[0].fmt.image_id, 1);
+
+        if let Some(im) = t.doc.image_mut(1) {
+            im.width_in = 3.2;
+            im.height_in = 1.6;
+            im.caption = "Figure 1: System Architecture".into();
+        }
+        let json = crate::doc::to_json(&t.doc);
+        let restored = crate::doc::from_json(&json).expect("roundtrip json");
+        let r_img = restored.image(1).expect("restored image");
+        assert_eq!(r_img.caption, "Figure 1: System Architecture");
+        assert!((r_img.width_in - 3.2).abs() < 0.001);
+        assert!((r_img.height_in - 1.6).abs() < 0.001);
+        let (dw, dh, drgba) = r_img.decode_rgba().expect("decode restored rgba");
+        assert_eq!((dw, dh), (40, 20));
+        assert_eq!(&drgba[0..4], &[43, 87, 151, 255]);
     }
 }

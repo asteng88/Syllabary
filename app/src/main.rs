@@ -6,6 +6,7 @@ mod dialogs;
 mod doc;
 mod docx;
 mod pdf;
+mod print;
 mod spell;
 mod editor;
 mod fonts;
