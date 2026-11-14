@@ -777,6 +777,10 @@ pub struct ParaFmt {
     #[serde(default)]
     pub hr: bool,
     #[serde(default)]
+    pub hr_color: Option<[u8; 3]>,
+    #[serde(default)]
+    pub hr_width_pt: f32,
+    #[serde(default)]
     pub shading: Option<[u8; 3]>,
     /// 0 = normal text paragraph; >= 1 = `DocImage::id` embedded in this paragraph block.
     #[serde(default)]
@@ -804,6 +808,8 @@ impl Default for ParaFmt {
             checked: false,
             bullet_preset: 0,
             hr: false,
+            hr_color: None,
+            hr_width_pt: 0.0,
             shading: None,
             image_id: 0,
             table_id: 0,
@@ -1002,6 +1008,8 @@ pub struct DocImage {
     #[serde(default)]
     pub caption: String,
     pub png_b64: String,
+    #[serde(default)]
+    pub seamless: bool,
 }
 
 const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1092,6 +1100,35 @@ impl DocImage {
             height_in,
             caption: String::new(),
             png_b64,
+            seamless: false,
+        })
+    }
+
+    /// Creates a `DocImage` preserving exact physical dimensions `(width_in, height_in)` in inches.
+    pub fn from_exact_bytes(
+        id: u64,
+        name: String,
+        bytes: &[u8],
+        width_in: f32,
+        height_in: f32,
+        seamless: bool,
+    ) -> Result<Self, String> {
+        let dyn_img = image::load_from_memory(bytes).map_err(|e| format!("Unsupported or corrupt image: {e}"))?;
+        let w = dyn_img.width().max(1);
+        let h = dyn_img.height().max(1);
+        let mut png_bytes = Vec::new();
+        dyn_img
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .map_err(|e| format!("Failed to encode image: {e}"))?;
+        Ok(Self {
+            id,
+            name,
+            natural_size: [w, h],
+            width_in: width_in.clamp(0.06, 10.5),
+            height_in: height_in.clamp(0.05, 13.5),
+            caption: String::new(),
+            png_b64: base64_encode(&png_bytes),
+            seamless,
         })
     }
 
@@ -1119,6 +1156,33 @@ impl Pos {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FooterRun {
+    pub text: String,
+    pub style: CharStyle,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FooterSegment {
+    pub runs: Vec<FooterRun>,
+    /// Horizontal start X in PDF points from the left edge of the page.
+    pub x_pt: f32,
+    /// Horizontal end X in PDF points from the left edge of the page.
+    pub max_x_pt: f32,
+    /// Typographic baseline distance from the bottom edge of the page in PDF points.
+    pub bottom_pt: f32,
+    /// Horizontal anchor (`Left` anchors at `x_pt`, `Center` at midpoint, `Right` at `max_x_pt`).
+    pub align: Align,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PageFooter {
+    pub segments: Vec<FooterSegment>,
+    /// Optional horizontal divider rule above the footer: `(x0_pt, x1_pt, y_from_bottom_pt, width_pt, color)`.
+    #[serde(default)]
+    pub rule: Option<(f32, f32, f32, f32, [u8; 3])>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub paras: Vec<Para>,
@@ -1129,6 +1193,7 @@ pub struct Document {
     pub footer_align: Align,
     pub header_italic: bool,
     pub footer_italic: bool,
+    pub page_footers: Vec<PageFooter>,
     pub info: DocInfo,
     pub links: Vec<String>,
     pub comments: Vec<DocComment>,
@@ -1152,6 +1217,7 @@ impl Default for Document {
             footer_align: Align::Center,
             header_italic: false,
             footer_italic: false,
+            page_footers: Vec::new(),
             info: DocInfo::default(),
             links: Vec::new(),
             comments: Vec::new(),
@@ -2332,6 +2398,65 @@ impl Document {
         self.paras.iter().map(|p| p.string()).collect::<Vec<_>>().join("\n")
     }
 
+    /// Resolves the positioned rich footer for `page_idx` (`0`-based), if any.
+    pub fn resolved_page_footer(&self, page_idx: usize, total_pages: usize) -> Option<std::borrow::Cow<'_, PageFooter>> {
+        if self.page_footers.is_empty() {
+            return None;
+        }
+        if let Some(pf) = self.page_footers.get(page_idx) {
+            if !pf.segments.is_empty() || pf.rule.is_some() {
+                // If total_pages changed due to user edits, keep "Page X of Y" totals accurate on existing pages too
+                if total_pages != self.page_footers.len()
+                    && pf.segments.iter().any(|s| s.runs.iter().any(|r| r.text.to_ascii_lowercase().contains("page ")))
+                {
+                    let mut cloned = pf.clone();
+                    for seg in &mut cloned.segments {
+                        for run in &mut seg.runs {
+                            run.text = update_footer_page_nums(&run.text, page_idx + 1, total_pages);
+                        }
+                    }
+                    return Some(std::borrow::Cow::Owned(cloned));
+                }
+                return Some(std::borrow::Cow::Borrowed(pf));
+            }
+            return None;
+        }
+        // Extra pages added after import: inherit the last non-empty page footer template
+        let template = self
+            .page_footers
+            .iter()
+            .rev()
+            .find(|pf| !pf.segments.is_empty() || pf.rule.is_some())?;
+        let mut cloned = template.clone();
+        for seg in &mut cloned.segments {
+            for run in &mut seg.runs {
+                run.text = update_footer_page_nums(&run.text, page_idx + 1, total_pages);
+            }
+        }
+        Some(std::borrow::Cow::Owned(cloned))
+    }
+
+    /// Concatenated text of headers and footers across the document (used for full-document search/indexing).
+    pub fn header_footer_plain_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if !self.header.trim().is_empty() {
+            parts.push(self.header.clone());
+        }
+        if !self.page_footers.is_empty() {
+            for pf in &self.page_footers {
+                for seg in &pf.segments {
+                    let s: String = seg.runs.iter().map(|r| r.text.as_str()).collect();
+                    if !s.trim().is_empty() {
+                        parts.push(s);
+                    }
+                }
+            }
+        } else if !self.footer.trim().is_empty() {
+            parts.push(self.footer.clone());
+        }
+        parts.join("\n")
+    }
+
     /// (characters, words) — the counts behind "The document contains %ld characters and %ld words."
     pub fn counts(&self, range: Option<(Pos, Pos)>) -> (usize, usize) {
         let text = match range {
@@ -2539,6 +2664,45 @@ struct FilePara {
     runs: Vec<FileRun>,
 }
 
+/// Updates `"Page N"` or `"Page N of M"` patterns inside a footer string when page count changes.
+fn update_footer_page_nums(s: &str, page_1: usize, total_pages: usize) -> String {
+    let lower = s.to_ascii_lowercase();
+    let Some(idx) = lower.find("page ") else {
+        return s.to_string();
+    };
+    let after_kw = idx + 5;
+    let bytes = s.as_bytes();
+    let mut i = after_kw;
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    let d1_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == d1_start {
+        return s.to_string();
+    }
+    let d1_end = i;
+    // Optional " of M"
+    let rest_lower = &lower[d1_end..];
+    if let Some(of_rel) = rest_lower.strip_prefix(" of ") {
+        let mut j = 0;
+        while j < of_rel.len() && of_rel.as_bytes()[j] == b' ' {
+            j += 1;
+        }
+        let d2_start = j;
+        while j < of_rel.len() && of_rel.as_bytes()[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > d2_start {
+            let total_end = d1_end + 4 + j;
+            return format!("{}{} of {}{}", &s[..d1_start], page_1, total_pages.max(1), &s[total_end..]);
+        }
+    }
+    format!("{}{}{}", &s[..d1_start], page_1, &s[d1_end..])
+}
+
 fn default_hf_align() -> Align {
     Align::Center
 }
@@ -2560,6 +2724,8 @@ struct FileDoc {
     header_italic: bool,
     #[serde(default)]
     footer_italic: bool,
+    #[serde(default)]
+    page_footers: Vec<PageFooter>,
     #[serde(default)]
     info: DocInfo,
     #[serde(default)]
@@ -2596,6 +2762,7 @@ pub fn to_json(doc: &Document) -> String {
         footer_align: doc.footer_align,
         header_italic: doc.header_italic,
         footer_italic: doc.footer_italic,
+        page_footers: doc.page_footers.clone(),
         info: doc.info.clone(),
         links: doc.links.clone(),
         comments: doc.comments.clone(),
@@ -2644,6 +2811,7 @@ pub fn from_json(s: &str) -> Result<Document, String> {
         footer_align: fd.footer_align,
         header_italic: fd.header_italic,
         footer_italic: fd.footer_italic,
+        page_footers: fd.page_footers,
         info: fd.info,
         links: fd.links,
         comments: fd.comments,
@@ -3044,6 +3212,7 @@ pub fn from_gdoc(s: &str) -> Result<Document, String> {
                             height_in: h_in,
                             caption,
                             png_b64: b64,
+                            seamless: false,
                         });
                     }
                 }
@@ -4326,6 +4495,7 @@ pub fn from_rtf(src: &str) -> Document {
                         String::new()
                     },
                     png_b64: String::new(),
+                    seamless: false,
                 });
             }
         }

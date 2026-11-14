@@ -159,6 +159,7 @@ pub enum Cmd {
     OpenComments,
     InsertImage,
     ImageProps(u64),
+    PageSetup,
 }
 
 impl Tab {
@@ -1810,8 +1811,26 @@ impl Tab {
                 }
             }
         }
+        let mut clicked_hf_margin = false;
+        if !toggled_checkbox && !clicked_image && !handled_table_edge && !lay.draft && opts.mode != DocMode::Viewing && resp.double_clicked() {
+            if let Some(pp) = resp.interact_pointer_pos() {
+                for k in 0..lay.pages {
+                    let r = Rect::from_min_size(canvas.min + lay.page_origin(k, canvas.width()).to_vec2(), lay.page_size);
+                    if r.contains(pp) {
+                        let content_top = r.min.y + lay.content_offset.y;
+                        let content_bot = content_top + lay.content_size.y;
+                        if pp.y < content_top - 4.0 || pp.y > content_bot + 4.0 {
+                            cmds.push(Cmd::PageSetup);
+                            clicked_hf_margin = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         if !toggled_checkbox
             && !clicked_image
+            && !clicked_hf_margin
             && !handled_table_edge
             && !clicked_table_hdr
             && self.resizing_image.is_none()
@@ -1945,35 +1964,96 @@ impl Tab {
                     let hy = r.min.y + (lay.content_offset.y * 0.5 - gh * 0.5).max(3.0 * opts.zoom);
                     painter.galley(pos2(hx, hy), gal, Color32::BLACK);
                 }
-                let mut foot = self.doc.footer.clone();
-                if self.doc.page.page_numbers {
-                    let pn = format!("Page {}", k + 1);
-                    foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
-                }
-                if !foot.is_empty() {
-                    let (fam, fake_it) = opts.book.family(0, false, self.doc.footer_italic);
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(
-                        &foot,
-                        0.0,
-                        egui::text::TextFormat {
-                            font_id: egui::FontId::new(10.0 * pt, fam),
-                            color: Color32::from_gray(95),
-                            italics: fake_it,
-                            ..Default::default()
-                        },
-                    );
-                    let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
-                    let gw = gal.rect.width();
-                    let gh = gal.rect.height();
-                    let fx = match self.doc.footer_align {
-                        Align::Left | Align::Justify => content.min.x,
-                        Align::Center => content.center().x - gw * 0.5,
-                        Align::Right => (content.max.x - gw).max(content.min.x),
-                    };
-                    let bot_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y).max(gh + 4.0);
-                    let fy = r.max.y - (bot_margin * 0.5 + gh * 0.5).max(gh + 2.0 * opts.zoom);
-                    painter.galley(pos2(fx, fy), gal, Color32::BLACK);
+                if let Some(pf) = self.doc.resolved_page_footer(k, lay.pages) {
+                    if let Some((x0, x1, y_bot, w_pt, col)) = pf.rule {
+                        let ry = (r.max.y - y_bot * pt).clamp(r.min.y + 2.0, r.max.y - 2.0);
+                        painter.line_segment(
+                            [pos2(r.min.x + x0 * pt, ry), pos2(r.min.x + x1 * pt, ry)],
+                            Stroke::new((w_pt * pt).max(0.8), layout::color(col)),
+                        );
+                    }
+                    for seg in &pf.segments {
+                        let mut job = egui::text::LayoutJob::default();
+                        for run in &seg.runs {
+                            let st = run.style;
+                            let (fam, fake_it) = opts.book.family(st.font, st.bold, st.italic);
+                            let ul_stroke = if st.underline {
+                                Stroke::new((st.size * pt / 14.0).max(0.8), layout::color(st.color))
+                            } else {
+                                Stroke::NONE
+                            };
+                            let st_stroke = if st.strike {
+                                Stroke::new((st.size * pt / 14.0).max(0.8), layout::color(st.color))
+                            } else {
+                                Stroke::NONE
+                            };
+                            job.append(
+                                &run.text,
+                                0.0,
+                                egui::text::TextFormat {
+                                    font_id: egui::FontId::new(st.size.max(4.5) * pt, fam),
+                                    color: layout::color(st.color),
+                                    background: st.highlight.map_or(Color32::TRANSPARENT, layout::color),
+                                    italics: fake_it,
+                                    underline: ul_stroke,
+                                    strikethrough: st_stroke,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                        let gw = gal.rect.width();
+                        let gh = gal.rect.height();
+                        let fx = match seg.align {
+                            Align::Center => {
+                                let mid = r.min.x + ((seg.x_pt + seg.max_x_pt) * 0.5) * pt;
+                                (mid - gw * 0.5).clamp(r.min.x + 2.0 * pt, (r.max.x - gw - 2.0 * pt).max(r.min.x))
+                            }
+                            Align::Right => (r.min.x + seg.max_x_pt * pt - gw).max(r.min.x + 2.0 * pt),
+                            Align::Left | Align::Justify => {
+                                (r.min.x + seg.x_pt * pt).min((r.max.x - gw - 2.0 * pt).max(r.min.x))
+                            }
+                        };
+                        let ascent = gal
+                            .rows
+                            .first()
+                            .and_then(|rw| rw.row.glyphs.first())
+                            .map_or(gh * 0.78, |g| g.pos.y);
+                        let fy = (r.max.y - seg.bottom_pt * pt - ascent)
+                            .clamp(r.min.y + 1.0 * pt, (r.max.y - gh - 1.0 * pt).max(r.min.y));
+                        painter.galley(pos2(fx, fy), gal, Color32::BLACK);
+                    }
+                } else {
+                    let mut foot = self.doc.footer.clone();
+                    if self.doc.page.page_numbers {
+                        let pn = format!("Page {}", k + 1);
+                        foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
+                    }
+                    if !foot.is_empty() {
+                        let (fam, fake_it) = opts.book.family(0, false, self.doc.footer_italic);
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(
+                            &foot,
+                            0.0,
+                            egui::text::TextFormat {
+                                font_id: egui::FontId::new(10.0 * pt, fam),
+                                color: Color32::from_gray(95),
+                                italics: fake_it,
+                                ..Default::default()
+                            },
+                        );
+                        let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                        let gw = gal.rect.width();
+                        let gh = gal.rect.height();
+                        let fx = match self.doc.footer_align {
+                            Align::Left | Align::Justify => content.min.x,
+                            Align::Center => content.center().x - gw * 0.5,
+                            Align::Right => (content.max.x - gw).max(content.min.x),
+                        };
+                        let bot_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y).max(gh + 4.0);
+                        let fy = r.max.y - (bot_margin * 0.42 + gh * 0.5).clamp(gh + 3.0 * opts.zoom, 30.0 * pt + gh * 0.5);
+                        painter.galley(pos2(fx, fy), gal, Color32::BLACK);
+                    }
                 }
             }
 
@@ -2088,16 +2168,31 @@ impl Tab {
             // Horizontal rule divider
             if pfmt.hr && l.first_in_para {
                 let y_mid = o.y + l.height * 0.5;
-                painter.line_segment([pos2(content_x, y_mid), pos2(content_x + lay.content_size.x, y_mid)], Stroke::new(1.5, Color32::from_gray(185)));
+                let hr_col = pfmt.hr_color.map_or(Color32::from_gray(185), layout::color);
+                let hr_w = if pfmt.hr_width_pt > 0.0 {
+                    (pfmt.hr_width_pt * (lay.ppi / 72.0)).max(0.8)
+                } else {
+                    1.5
+                };
+                painter.line_segment([pos2(content_x, y_mid), pos2(content_x + lay.content_size.x, y_mid)], Stroke::new(hr_w, hr_col));
             }
 
             // Embedded image block + caption + interactive resize handles
             if pfmt.image_id > 0 && l.first_in_para {
                 let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
-                let avail = (lay.content_size.x - indent).max(lay.ppi * 0.8);
+                let cell_avail = if pfmt.table_id > 0 {
+                    lay.cells
+                        .iter()
+                        .find(|c| c.table_id == pfmt.table_id && c.row == pfmt.table_row && c.col == pfmt.table_col && c.page == l.page)
+                        .map(|c| (c.rect.width() - 8.0).max(12.0))
+                } else {
+                    None
+                };
+                let avail = cell_avail.unwrap_or_else(|| (lay.content_size.x - indent).max(lay.ppi * 0.25));
                 if let Some((img_w, img_h, _cap_h, total_h)) = layout::image_box(&self.doc, pfmt.image_id, avail, lay.ppi) {
                     let scale = lay.ppi / 72.0;
-                    let pad_top = 4.0 * scale;
+                    let seamless = self.doc.image(pfmt.image_id).is_some_and(|im| im.seamless);
+                    let pad_top = if seamless { 1.0 * scale } else { 3.0 * scale };
                     let img_r = Rect::from_min_size(pos2(o.x, o.y + pad_top), vec2(img_w, img_h));
                     let full_r = Rect::from_min_size(pos2(o.x, o.y), vec2(img_w, total_h));
                     let tex_opt = if let Some(doc_img) = self.doc.image(pfmt.image_id) {
@@ -2118,17 +2213,20 @@ impl Tab {
                     } else {
                         None
                     };
-                    painter.rect_filled(img_r.translate(vec2(0.0, 1.5)).expand(1.0), 4.0, Color32::from_black_alpha(16));
+                    let is_sel = self.selected_image == Some(pfmt.image_id);
+                    let is_hov = hover_pos.is_some_and(|hp| full_r.expand(4.0).contains(hp));
+                    if !seamless || is_sel || is_hov {
+                        painter.rect_filled(img_r.translate(vec2(0.0, 1.5)).expand(1.0), 4.0, Color32::from_black_alpha(16));
+                    }
                     if let Some(tid) = tex_opt {
                         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                         painter.image(tid, img_r, uv, Color32::WHITE);
                     } else {
                         painter.rect_filled(img_r, 4.0, Color32::from_gray(235));
                     }
-                    painter.rect_stroke(img_r, 3.0, Stroke::new(1.0, Color32::from_black_alpha(28)), StrokeKind::Inside);
-
-                    let is_sel = self.selected_image == Some(pfmt.image_id);
-                    let is_hov = hover_pos.is_some_and(|hp| full_r.expand(4.0).contains(hp));
+                    if !seamless || is_sel || is_hov {
+                        painter.rect_stroke(img_r, 3.0, Stroke::new(1.0, Color32::from_black_alpha(28)), StrokeKind::Inside);
+                    }
                     if let Some(doc_img) = self.doc.image(pfmt.image_id) {
                         if !doc_img.caption.is_empty() {
                             let cap_font = egui::FontId::new((10.0 * scale).max(8.5), egui::FontFamily::Proportional);

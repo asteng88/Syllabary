@@ -13,7 +13,7 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
-use crate::doc::{lerp_rgb, Align, CharStyle, Document, ListKind};
+use crate::doc::{lerp_rgb, Align, CharStyle, Document, FooterSegment, ListKind};
 use crate::fonts::FontBook;
 use crate::layout;
 
@@ -341,9 +341,11 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
     let ppp = ctx.pixels_per_point().max(1.0);
 
     // Pre-shape header, footer & image caption galleys so their glyphs are present in the font atlas
-    let hf_size = 10.0 * lay.ppi / 72.0;
+    let pt = lay.ppi / 72.0;
+    let hf_size = 10.0 * pt;
     let hf_col = Color32::from_rgb(95, 95, 95);
-    let (header_galley, footer_galleys, caption_galleys) = ctx.fonts_mut(|fonts| {
+    type RichFooterLayout = (Option<(f32, f32, f32, f32, [u8; 3])>, Vec<(FooterSegment, Arc<Galley>)>);
+    let (header_galley, rich_footer_galleys, footer_galleys, caption_galleys) = ctx.fonts_mut(|fonts| {
         let hg = if !doc.header.is_empty() {
             let (fam, fake_it) = book.family(0, false, doc.header_italic);
             let mut job = LayoutJob::default();
@@ -361,8 +363,34 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
         } else {
             None
         };
+        let mut rfgs: Vec<Option<RichFooterLayout>> = Vec::with_capacity(lay.pages);
         let mut fgs: Vec<Option<Arc<Galley>>> = Vec::with_capacity(lay.pages);
         for k in 0..lay.pages {
+            if let Some(pf) = doc.resolved_page_footer(k, lay.pages) {
+                let mut seg_gals = Vec::with_capacity(pf.segments.len());
+                for seg in &pf.segments {
+                    let mut job = LayoutJob::default();
+                    for run in &seg.runs {
+                        let st = run.style;
+                        let (fam, fake_it) = book.family(st.font, st.bold, st.italic);
+                        job.append(
+                            &run.text,
+                            0.0,
+                            TextFormat {
+                                font_id: FontId::new(st.size.max(4.5) * pt, fam),
+                                color: Color32::from_rgb(st.color[0], st.color[1], st.color[2]),
+                                italics: fake_it,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    seg_gals.push((seg.clone(), fonts.layout_job(job)));
+                }
+                rfgs.push(Some((pf.rule, seg_gals)));
+                fgs.push(None);
+                continue;
+            }
+            rfgs.push(None);
             let mut foot = doc.footer.clone();
             if doc.page.page_numbers {
                 let pn = format!("Page {}", k + 1);
@@ -402,7 +430,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 cgs.insert(img.id, fonts.layout_job(job));
             }
         }
-        (hg, fgs, cgs)
+        (hg, rfgs, fgs, cgs)
     });
 
     let atlas = ctx.fonts_mut(|f| f.image());
@@ -412,7 +440,6 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
     let mut canvases: Vec<Canvas> = (0..lay.pages).map(|_| Canvas::new(img_w, img_h, doc.page.background)).collect();
 
     // 1. Header & Footer + Table cell backgrounds and borders on each page
-    let pt = lay.ppi / 72.0;
     for (k, canvas) in canvases.iter_mut().enumerate() {
         if let Some(hg) = &header_galley {
             let gw = hg.rect.width();
@@ -425,7 +452,33 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
             let hy = (lay.content_offset.y * 0.5 - gh * 0.5).max(3.0 * scale);
             canvas.blit_galley(hg, &atlas, hx, hy, ppp);
         }
-        if let Some(Some(fg)) = footer_galleys.get(k) {
+        if let Some(Some((rule, seg_gals))) = rich_footer_galleys.get(k) {
+            if let Some((x0, x1, y_bot, w_pt, col)) = *rule {
+                let ry = (lay.page_size.y - y_bot * pt).clamp(2.0 * scale, lay.page_size.y - 2.0 * scale);
+                let half_h = (w_pt * pt * ppp * 0.5).max(0.5);
+                canvas.fill_gradient_pill(x0 * pt * ppp, ry * ppp - half_h, x1 * pt * ppp, ry * ppp + half_h, 0.0, col, col);
+            }
+            for (seg, fg) in seg_gals {
+                let gw = fg.rect.width();
+                let gh = fg.rect.height();
+                let fx = match seg.align {
+                    Align::Center => {
+                        let mid = ((seg.x_pt + seg.max_x_pt) * 0.5) * pt;
+                        (mid - gw * 0.5).clamp(2.0 * pt, (lay.page_size.x - gw - 2.0 * pt).max(0.0))
+                    }
+                    Align::Right => (seg.max_x_pt * pt - gw).max(2.0 * pt),
+                    Align::Left | Align::Justify => (seg.x_pt * pt).min((lay.page_size.x - gw - 2.0 * pt).max(0.0)),
+                };
+                let ascent = fg
+                    .rows
+                    .first()
+                    .and_then(|rw| rw.row.glyphs.first())
+                    .map_or(gh * 0.78, |g| g.pos.y);
+                let fy = (lay.page_size.y - seg.bottom_pt * pt - ascent)
+                    .clamp(1.0 * pt, (lay.page_size.y - gh - 1.0 * pt).max(0.0));
+                canvas.blit_galley(fg, &atlas, fx, fy, ppp);
+            }
+        } else if let Some(Some(fg)) = footer_galleys.get(k) {
             let gw = fg.rect.width();
             let gh = fg.rect.height();
             let fx = match doc.footer_align {
@@ -434,7 +487,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 Align::Right => (lay.content_offset.x + lay.content_size.x - gw).max(lay.content_offset.x),
             };
             let bottom_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y).max(gh + 4.0 * scale);
-            let fy = lay.page_size.y - (bottom_margin * 0.5 + gh * 0.5).max(gh + 2.0 * scale);
+            let fy = lay.page_size.y - (bottom_margin * 0.42 + gh * 0.5).clamp(gh + 3.0 * scale, 30.0 * pt + gh * 0.5);
             canvas.blit_galley(fg, &atlas, fx, fy, ppp);
         }
 
@@ -510,25 +563,38 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
         // Horizontal rule divider
         if pfmt.hr && l.first_in_para {
             let y_mid = (oy + l.height * 0.5) * ppp;
-            let half = 0.75 * scale * ppp;
+            let hr_col = pfmt.hr_color.unwrap_or([185, 185, 185]);
+            let half = if pfmt.hr_width_pt > 0.0 {
+                (pfmt.hr_width_pt * pt * ppp * 0.5).max(0.5)
+            } else {
+                0.75 * scale * ppp
+            };
             canvas.fill_gradient_pill(
                 content_x * ppp,
                 y_mid - half,
                 (content_x + lay.content_size.x) * ppp,
                 y_mid + half,
                 0.0,
-                [185, 185, 185],
-                [185, 185, 185],
+                hr_col,
+                hr_col,
             );
         }
 
         // Embedded image block + caption
         if pfmt.image_id > 0 && l.first_in_para {
             let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
-            let avail = (lay.content_size.x - indent).max(lay.ppi * 0.8);
+            let cell_avail = if pfmt.table_id > 0 {
+                lay.cells
+                    .iter()
+                    .find(|c| c.table_id == pfmt.table_id && c.row == pfmt.table_row && c.col == pfmt.table_col && c.page == l.page)
+                    .map(|c| (c.rect.width() - 8.0).max(12.0))
+            } else {
+                None
+            };
+            let avail = cell_avail.unwrap_or_else(|| (lay.content_size.x - indent).max(lay.ppi * 0.25));
             if let Some((iw_pt, ih_pt, _cap_h, _tot_h)) = layout::image_box(doc, pfmt.image_id, avail, lay.ppi) {
                 if let Some(doc_img) = doc.image(pfmt.image_id) {
-                    let pad_top = 4.0 * (lay.ppi / 72.0);
+                    let pad_top = if doc_img.seamless { 1.0 } else { 3.0 } * (lay.ppi / 72.0);
                     if let Some((sw, sh, srgba)) = doc_img.decode_rgba() {
                         canvas.blit_rgba_scaled(
                             sw,
@@ -746,14 +812,44 @@ pub fn export_page_range(ctx: &egui::Context, doc: &Document, book: &FontBook, p
             let y = ph - lay.content_offset.y * 0.5 - 3.5;
             page.text(4, 10.0, gray, (pw - approx_width(&doc.header, 10.0)) / 2.0, y, &doc.header);
         }
-        let mut foot = doc.footer.clone();
-        if pg.page_numbers {
-            let pn = format!("Page {}", k + 1);
-            foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
-        }
-        if !foot.is_empty() {
-            let bottom = ph - lay.content_offset.y - lay.content_size.y;
-            page.text(4, 10.0, gray, (pw - approx_width(&foot, 10.0)) / 2.0, bottom * 0.5 - 3.5, &foot);
+        if let Some(pf) = doc.resolved_page_footer(k, lay.pages) {
+            if let Some((x0, x1, y_bot, w_pt, col)) = pf.rule {
+                page.rect(col, x0, y_bot - w_pt * 0.5, (x1 - x0).max(1.0), w_pt.max(0.5));
+            }
+            for seg in &pf.segments {
+                let total_txt: String = seg.runs.iter().map(|r| r.text.as_str()).collect();
+                let dom_size = seg.runs.first().map_or(9.0, |r| r.style.size.max(4.5));
+                let est_w = approx_width(&total_txt, dom_size);
+                let mut cur_x = match seg.align {
+                    Align::Center => ((seg.x_pt + seg.max_x_pt) * 0.5 - est_w * 0.5).max(2.0),
+                    Align::Right => (seg.max_x_pt - est_w).max(2.0),
+                    Align::Left | Align::Justify => seg.x_pt.max(2.0),
+                };
+                for run in &seg.runs {
+                    let st = run.style;
+                    let sz = st.size.max(4.5);
+                    page.text(font_res(&st), sz, st.color, cur_x, seg.bottom_pt.max(2.0), &run.text);
+                    cur_x += approx_width(&run.text, sz);
+                }
+            }
+        } else {
+            let mut foot = doc.footer.clone();
+            if pg.page_numbers {
+                let pn = format!("Page {}", k + 1);
+                foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
+            }
+            if !foot.is_empty() {
+                let bottom = ph - lay.content_offset.y - lay.content_size.y;
+                let fw = approx_width(&foot, 10.0);
+                let fx = match doc.footer_align {
+                    Align::Left | Align::Justify => lay.content_offset.x,
+                    Align::Center => (pw - fw) * 0.5,
+                    Align::Right => (lay.content_offset.x + lay.content_size.x - fw).max(lay.content_offset.x),
+                };
+                let fid = if doc.footer_italic { 6 } else { 4 };
+                let fy = (bottom * 0.42 - 3.5).clamp(6.0, 28.0);
+                page.text(fid, 10.0, gray, fx, fy, &foot);
+            }
         }
     }
 

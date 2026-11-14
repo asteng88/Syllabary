@@ -208,6 +208,7 @@ pub fn recovery_dir() -> Option<PathBuf> {
 }
 
 pub struct App {
+    pub egui_ctx: egui::Context,
     pub tabs: Vec<Tab>,
     pub active: usize,
     next_id: u64,
@@ -270,6 +271,7 @@ impl App {
         let theme = if cfg.dark { Theme::dark() } else { Theme::light() };
         theme.apply(&cc.egui_ctx);
         let mut app = Self {
+            egui_ctx: cc.egui_ctx.clone(),
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
@@ -476,6 +478,13 @@ impl App {
                     return;
                 }
             },
+            "pdf" => match crate::pdf_import::read(&bytes) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.toast(format!("Couldn't read that PDF file: {e}"));
+                    return;
+                }
+            },
             "doc" => {
                 self.toast("Old Word (.doc) files aren't supported. Save it as .docx or Rich Text first.".into());
                 return;
@@ -495,7 +504,7 @@ impl App {
             doc,
         );
         self.next_id += 1;
-        if matches!(ext.as_str(), "wpx" | "gdoc" | "rtf" | "txt" | "docx" | "md" | "markdown") {
+        if matches!(ext.as_str(), "wpx" | "gdoc" | "rtf" | "txt" | "docx" | "md" | "markdown" | "pdf") {
             t.path = Some(path.to_path_buf());
         }
         self.tabs.push(t);
@@ -547,9 +556,17 @@ impl App {
             p
         } else {
             let base = self.tabs[idx].name.split('.').next().unwrap_or("Document").to_string();
+            let default_ext = self.tabs[idx]
+                .path
+                .as_ref()
+                .and_then(|p| p.extension())
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .filter(|e| matches!(e.as_str(), "wpx" | "gdoc" | "docx" | "pdf" | "md" | "rtf" | "txt"))
+                .unwrap_or_else(|| FILE_EXT.to_string());
             match rfd::FileDialog::new()
-                .set_file_name(format!("{base}.{FILE_EXT}"))
+                .set_file_name(format!("{base}.{default_ext}"))
                 .add_filter("Scribe Pro document", &[FILE_EXT])
+                .add_filter("PDF document", &["pdf"])
                 .add_filter("Google Docs", &["gdoc"])
                 .add_filter("Word document", &["docx"])
                 .add_filter("Markdown", &["md"])
@@ -561,7 +578,16 @@ impl App {
                 None => return false,
             }
         };
-        match Self::write_doc(&self.tabs[idx].doc, &path) {
+        let is_pdf = path
+            .extension()
+            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"));
+        let res = if is_pdf {
+            let bytes = crate::pdf::export(&self.egui_ctx, &self.tabs[idx].doc, &self.book);
+            std::fs::write(&path, bytes)
+        } else {
+            Self::write_doc(&self.tabs[idx].doc, &path)
+        };
+        match res {
             Ok(()) => {
                 let t = &mut self.tabs[idx];
                 t.path = Some(path.clone());
@@ -860,7 +886,8 @@ impl App {
                 Action::New => self.new_doc(),
                 Action::Open => {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Documents", &[FILE_EXT, "gdoc", "docx", "md", "rtf", "txt"])
+                        .add_filter("Documents", &[FILE_EXT, "gdoc", "docx", "pdf", "md", "rtf", "txt"])
+                        .add_filter("PDF documents", &["pdf"])
                         .add_filter("Google Docs", &["gdoc"])
                         .add_filter("All files", &["*"])
                         .pick_file()
@@ -1683,6 +1710,7 @@ impl App {
                 Cmd::OpenComments => Action::ToggleComments,
                 Cmd::InsertImage => Action::InsertImage,
                 Cmd::ImageProps(id) => Action::Dialog(Dialog::ImageProps(id)),
+                Cmd::PageSetup => Action::Dialog(Dialog::PageSetup),
             };
             self.actions.push(a);
         }

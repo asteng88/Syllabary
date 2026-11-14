@@ -1908,6 +1908,10 @@ fn page_setup(app: &mut App, ctx: &egui::Context, open: &mut bool, now: f64) {
     let mut pageless = t.doc.pageless;
     let mut header = t.doc.header.clone();
     let mut footer = t.doc.footer.clone();
+    let mut header_align = t.doc.header_align;
+    let mut footer_align = t.doc.footer_align;
+    let mut header_italic = t.doc.header_italic;
+    let mut footer_italic = t.doc.footer_italic;
     window("Page setup").open(open).show(ctx, |ui| {
         ui.set_min_width(380.0);
         // Google Docs Pages / Pageless tabs
@@ -1975,8 +1979,26 @@ fn page_setup(app: &mut App, ctx: &egui::Context, open: &mut bool, now: f64) {
                 ui.label("Header");
                 ui.add(egui::TextEdit::singleline(&mut header).desired_width(260.0).hint_text("Text at the top of every page"));
                 ui.end_row();
+                ui.label("Header style");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut header_align, Align::Left, "Left");
+                    ui.selectable_value(&mut header_align, Align::Center, "Center");
+                    ui.selectable_value(&mut header_align, Align::Right, "Right");
+                    ui.separator();
+                    ui.checkbox(&mut header_italic, "Italic");
+                });
+                ui.end_row();
                 ui.label("Footer");
                 ui.add(egui::TextEdit::singleline(&mut footer).desired_width(260.0).hint_text("Text at the bottom of every page"));
+                ui.end_row();
+                ui.label("Footer style");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut footer_align, Align::Left, "Left");
+                    ui.selectable_value(&mut footer_align, Align::Center, "Center");
+                    ui.selectable_value(&mut footer_align, Align::Right, "Right");
+                    ui.separator();
+                    ui.checkbox(&mut footer_italic, "Italic");
+                });
                 ui.end_row();
                 ui.label("");
                 ui.checkbox(&mut pg.page_numbers, "Page numbers (\"Page 1\")");
@@ -1994,12 +2016,62 @@ fn page_setup(app: &mut App, ctx: &egui::Context, open: &mut bool, now: f64) {
         }
     });
     let t = app.tab();
-    if pg != t.doc.page || pageless != t.doc.pageless || header != t.doc.header || footer != t.doc.footer {
+    if pg != t.doc.page
+        || pageless != t.doc.pageless
+        || header != t.doc.header
+        || footer != t.doc.footer
+        || header_align != t.doc.header_align
+        || footer_align != t.doc.footer_align
+        || header_italic != t.doc.header_italic
+        || footer_italic != t.doc.footer_italic
+    {
+        let footer_text_changed = footer != t.doc.footer;
+        let footer_align_changed = footer_align != t.doc.footer_align;
+        let footer_italic_changed = footer_italic != t.doc.footer_italic;
+        let page_nums_changed = pg.page_numbers != t.doc.page.page_numbers;
         t.checkpoint(EditKind::Typing, now);
         t.doc.page = pg;
         t.doc.pageless = pageless;
         t.doc.header = header;
         t.doc.footer = footer;
+        t.doc.header_align = header_align;
+        t.doc.footer_align = footer_align;
+        t.doc.header_italic = header_italic;
+        t.doc.footer_italic = footer_italic;
+        if footer_text_changed || page_nums_changed {
+            t.doc.page_footers.clear();
+        } else if footer_align_changed || footer_italic_changed {
+            let pw_pt = t.doc.page.width * 72.0;
+            let ml_pt = t.doc.page.margin_left * 72.0;
+            let mr_pt = t.doc.page.margin_right * 72.0;
+            for pf in &mut t.doc.page_footers {
+                if pf.segments.len() == 1 {
+                    let seg = &mut pf.segments[0];
+                    if footer_align_changed {
+                        seg.align = footer_align;
+                        match footer_align {
+                            Align::Left | Align::Justify => {
+                                seg.x_pt = ml_pt;
+                                seg.max_x_pt = pw_pt - mr_pt;
+                            }
+                            Align::Center => {
+                                seg.x_pt = ml_pt;
+                                seg.max_x_pt = pw_pt - mr_pt;
+                            }
+                            Align::Right => {
+                                seg.x_pt = ml_pt;
+                                seg.max_x_pt = pw_pt - mr_pt;
+                            }
+                        }
+                    }
+                    if footer_italic_changed {
+                        for r in &mut seg.runs {
+                            r.style.italic = footer_italic;
+                        }
+                    }
+                }
+            }
+        }
         t.changed();
         t.scroll_to_caret = false;
     }

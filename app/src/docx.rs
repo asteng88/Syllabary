@@ -1763,6 +1763,7 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                                 height_in,
                                 caption: draw_caption.clone(),
                                 png_b64: base64_encode(img_bytes),
+                                seamless: false,
                             });
                             p.fmt.image_id = id;
                         }

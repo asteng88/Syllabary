@@ -236,12 +236,20 @@ fn single_row(galley: &Arc<Galley>, row: usize, para: &Para, start: usize, end: 
 pub fn image_box(doc: &Document, image_id: u64, avail_w: f32, ppi: f32) -> Option<(f32, f32, f32, f32)> {
     let img = doc.image(image_id)?;
     let zoom = (ppi / BASE_PPI).max(0.25);
-    let raw_w = (img.width_in * ppi).max(36.0 * zoom);
-    let img_w = raw_w.min(avail_w.max(36.0 * zoom));
+    let min_w = if img.seamless { 6.0 * zoom } else { 24.0 * zoom };
+    let min_h = if img.seamless { 4.0 * zoom } else { 16.0 * zoom };
+    let raw_w = (img.width_in * ppi).max(min_w);
+    let img_w = raw_w.min(avail_w.max(min_w));
     let scale = if raw_w > 0.0 { img_w / raw_w } else { 1.0 };
-    let img_h = (img.height_in * ppi * scale).max(24.0 * zoom);
-    let cap_h = if !img.caption.trim().is_empty() { 22.0 * zoom } else { 18.0 * zoom };
-    let total_h = img_h + cap_h + 12.0 * zoom;
+    let img_h = (img.height_in * ppi * scale).max(min_h);
+    let (cap_h, pad_v) = if !img.caption.trim().is_empty() {
+        (22.0 * zoom, 10.0 * zoom)
+    } else if img.seamless {
+        (0.0, 2.0 * zoom)
+    } else {
+        (6.0 * zoom, 8.0 * zoom)
+    };
+    let total_h = img_h + cap_h + pad_v;
     Some((img_w, img_h, cap_h, total_h))
 }
 
