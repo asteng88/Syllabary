@@ -18,7 +18,7 @@ pub const ZOOM_MIN: f32 = 0.25; // the person's decision
 pub const ZOOM_MAX: f32 = 2.0;
 pub const ZOOM_START: f32 = 1.0; // "Standard (100%)"
 pub const AUTOSAVE_MIN_DEFAULT: u32 = 10;
-pub const APP_NAME: &str = "Scribe Pro";
+pub const APP_NAME: &str = "Syllabary";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ZoomMode {
@@ -201,10 +201,10 @@ impl Default for Config {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("ScribePro"))
+    dirs::config_dir().map(|d| d.join("Syllabary"))
 }
 pub fn recovery_dir() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("ScribePro").join("recovery"))
+    dirs::data_local_dir().map(|d| d.join("Syllabary").join("recovery"))
 }
 
 pub struct App {
@@ -265,7 +265,7 @@ impl App {
         let book = fonts::install(&cc.egui_ctx);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut cfg = if screenshot.is_some() { Config::default() } else { load_config() };
-        if std::env::var("SCRIBE_DARK").is_ok() {
+        if std::env::var("SYLLABARY_DARK").is_ok() || std::env::var("SCRIBE_DARK").is_ok() {
             cfg.dark = true;
         }
         let theme = if cfg.dark { Theme::dark() } else { Theme::light() };
@@ -329,12 +329,12 @@ impl App {
         if app.tabs.is_empty() {
             app.new_doc();
         }
-        if std::env::var("SCRIBE_DEMO_DOC").is_ok() {
+        if std::env::var("SYLLABARY_DEMO_DOC").is_ok() || std::env::var("SCRIBE_DEMO_DOC").is_ok() {
             app.show_nav = true;
             let t = app.tab();
             t.name = "Product Architecture Brief".to_string();
             t.doc.starred = true;
-            t.doc.summary = "Editorial specification & visual language overview for Scribe Pro.".to_string();
+            t.doc.summary = "Editorial specification & visual language overview for Syllabary.".to_string();
             t.doc.paras.clear();
             let push_str = |p: &mut Para, s: &str, st: CharStyle| {
                 for ch in s.chars() {
@@ -344,7 +344,7 @@ impl App {
             };
             let s0 = CharStyle { font: DEFAULT_FONT, size: 22.0, bold: true, color: [28, 35, 51], ..CharStyle::default() };
             let mut p0 = Para::new(s0, ParaFmt { style: 2, space_after: 6.0, ..ParaFmt::default() });
-            push_str(&mut p0, "Scribe Pro — Editorial Studio", s0);
+            push_str(&mut p0, "Syllabary — Editorial Studio", s0);
 
             let s1 = CharStyle { font: DEFAULT_FONT, size: 12.0, color: [71, 85, 105], ..CharStyle::default() };
             let mut p1 = Para::new(s1, ParaFmt { space_after: 10.0, ..ParaFmt::default() });
@@ -390,7 +390,7 @@ impl App {
             t.doc.paras.extend([p0, p1, p2, p3, p4, p5, p6, p7]);
             t.dirty = false;
         }
-        if std::env::var("SCRIBE_DESIGN_SHEET").is_ok() {
+        if std::env::var("SYLLABARY_DESIGN_SHEET").is_ok() || std::env::var("SCRIBE_DESIGN_SHEET").is_ok() {
             app.dialog = Dialog::DesignSheet;
         }
         if app.screenshot.is_none() {
@@ -565,7 +565,7 @@ impl App {
                 .unwrap_or_else(|| FILE_EXT.to_string());
             match rfd::FileDialog::new()
                 .set_file_name(format!("{base}.{default_ext}"))
-                .add_filter("Scribe Pro document", &[FILE_EXT])
+                .add_filter("Syllabary document", &[FILE_EXT])
                 .add_filter("PDF document", &["pdf"])
                 .add_filter("Google Docs", &["gdoc"])
                 .add_filter("Word document", &["docx"])
@@ -810,7 +810,7 @@ impl App {
                 let ns = &styles[10];
                 t.doc.paras[p].fmt = ns.fmt;
                 t.doc.paras[p].end_style = ns.chr;
-                let end = t.doc.insert_text(Pos::new(p, 0), "fn main() {\n    println!(\"Hello, Scribe Pro!\");\n}", ns.chr);
+                let end = t.doc.insert_text(Pos::new(p, 0), "fn main() {\n    println!(\"Hello, Syllabary!\");\n}", ns.chr);
                 p = end.p;
             }
             "table_2x2" => {
@@ -1061,7 +1061,7 @@ impl App {
                     ctx.memory_mut(|m| m.request_focus(self.doc_id));
                     if !open_system_emoji_picker() {
                         self.dialog = Dialog::Symbol;
-                        self.toast("Opened Scribe Pro Emoji & Symbol Library.".into());
+                        self.toast("Opened Syllabary Emoji & Symbol Library.".into());
                     }
                 }
                 Action::InsertFootnote => {
@@ -1799,7 +1799,14 @@ impl App {
 }
 
 fn load_config() -> Config {
-    config_dir().and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    config_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
+        .or_else(|| {
+            dirs::config_dir()
+                .and_then(|d| std::fs::read_to_string(d.join("ScribePro").join("settings.json")).ok())
+        })
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn remove_recovery(id: u64) {
@@ -2114,7 +2121,7 @@ impl eframe::App for App {
             }
         }
 
-        // window title, like "Scribe Pro - [Untitled1]"
+        // window title, like "Syllabary - [Untitled1]"
         let title = format!("{APP_NAME} - [{}]", self.tab_ref().title());
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));

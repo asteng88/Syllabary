@@ -43,14 +43,14 @@ fn main() -> eframe::Result<()> {
     let size = if screenshot.is_some() { [1600.0, 954.0] } else { [1440.0, 900.0] };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Scribe Pro - [Untitled1]")
+            .with_title("Syllabary - [Untitled1]")
             .with_inner_size(size)
             .with_maximized(true)
             .with_min_inner_size([720.0, 480.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Scribe Pro",
+        "Syllabary",
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, screenshot, open)))),
     )

@@ -1,7 +1,7 @@
 [project]
-name = "scribepro"
-version = "0.1.0"
-description = "Add your description here"
+name = "syllabary"
+version = "1.0.0"
+description = "Syllabary — fast, 100% offline desktop word processor and PDF/DOCX studio"
 readme = "README.md"
 authors = [
     { name = "asteng88", email = "asteng88@msn.com" }
@@ -10,7 +10,7 @@ requires-python = ">=3.14"
 dependencies = []
 
 [project.scripts]
-scribepro = "scribepro:main"
+syllabary = "syllabary:main"
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]

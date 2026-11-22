@@ -1,6 +1,6 @@
 # Bundled fonts
 
-These typefaces ship with Scribe Pro so documents look the same on any computer. They come from Google Fonts (via the Fontsource mirror, Latin character set) and are free to use, embed and redistribute under the SIL Open Font License 1.1; each folder holds its OFL.txt.
+These typefaces ship with Syllabary so documents look the same on any computer. They come from Google Fonts (via the Fontsource mirror, Latin character set) and are free to use, embed and redistribute under the SIL Open Font License 1.1; each folder holds its OFL.txt.
 
 - Lora — `lora/`
 - Merriweather — `merriweather/`

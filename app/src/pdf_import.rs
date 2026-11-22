@@ -1,7 +1,7 @@
 //! Native PDF importer: parses PDF 1.0–1.7+ files (xref tables, cross-reference streams,
 //! object streams, Flate/ASCII85/ASCIIHex/RunLength filters, PNG/TIFF predictors, ToUnicode CMaps,
 //! WinAnsi/MacRoman/Differences encodings, graphics state, text operators, vector decorations,
-//! and embedded images) into an editable Scribe Pro `Document`.
+//! and embedded images) into an editable Syllabary `Document`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -3101,7 +3101,7 @@ struct PageItem {
     kind: PageItemKind,
 }
 
-/// Parses raw PDF bytes into an editable Scribe Pro `Document`.
+/// Parses raw PDF bytes into an editable Syllabary `Document`.
 pub fn read(data: &[u8]) -> Result<Document, String> {
     let pdf = PdfDoc::open(data)?;
     let root_obj = pdf
@@ -3125,7 +3125,8 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
     if let Some(info_obj) = pdf.trailer.get("Info") {
         if let Some(info_dict) = pdf.resolve(info_obj).as_dict() {
             if let Some(b) = pdf.dict_get(info_dict, "Producer").as_str_bytes() {
-                if decode_pdf_text_string(b).contains("Scribe Pro") {
+                let prod = decode_pdf_text_string(b);
+                if prod.contains("Syllabary") || prod.contains("Scribe Pro") {
                     is_scribe_export = true;
                 }
             }
@@ -7057,7 +7058,7 @@ mod tests {
         let book = FontBook::default();
         let mut doc = Document::default();
         doc.info.title = "Quarterly Report".into();
-        doc.info.author = "Scribe Pro".into();
+        doc.info.author = "Syllabary".into();
         doc.insert_text(Pos::new(0, 0), "Hello ", CharStyle::default());
         doc.insert_text(
             Pos::new(0, 6),
@@ -7073,7 +7074,7 @@ mod tests {
 
         let imported = read(&bytes).expect("import exported PDF");
         assert_eq!(imported.info.title, "Quarterly Report");
-        assert_eq!(imported.info.author, "Scribe Pro");
+        assert_eq!(imported.info.author, "Syllabary");
         let plain = imported.plain_text();
         assert!(plain.contains("Hello"), "got: {plain:?}");
         assert!(plain.contains("PDF World"), "got: {plain:?}");

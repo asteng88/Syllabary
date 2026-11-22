@@ -109,7 +109,7 @@ fn mcheck(ui: &mut egui::Ui, th: &Theme, checked: bool, label: &str, sc: &str) -
 }
 
 impl App {
-    /// Unified Studio Header: Scribe crest, menu bar capsule, star & status pill,
+    /// Unified Studio Header: Syllabary crest, menu bar capsule, star & status pill,
     /// command search trigger, history, comments, mode switcher, theme pill, and document tab bar below.
     pub fn docs_header(&mut self, ui: &mut egui::Ui, th: &Theme) {
         let starred = self.tab_ref().doc.starred;
@@ -1407,7 +1407,7 @@ impl App {
                 &[
                     ("Search the menus", "Alt+/"),
                     ("Keyboard shortcuts", "Ctrl+/"),
-                    ("About Scribe Pro…", ""),
+                    ("About Syllabary…", ""),
                 ],
             );
             if mitem(ui, th, Icon::SearchMenus, "Search the menus", "Alt+/") {
@@ -1418,7 +1418,7 @@ impl App {
                 self.act(Action::Dialog(Dialog::Shortcuts));
             }
             ui.separator();
-            if mitem(ui, th, Icon::DocsLogo, "About Scribe Pro…", "") {
+            if mitem(ui, th, Icon::DocsLogo, "About Syllabary…", "") {
                 self.act(Action::Dialog(Dialog::About));
             }
         });
@@ -1511,7 +1511,7 @@ impl App {
 
         // Font picker: the current font shown in its own typeface; opens a searchable, grouped list
         let r = font_button(ui, th, &self.book, st.font);
-        if std::env::var("SCRIBE_DEMO_FONTS").is_ok() && ui.input(|i| i.time) > 0.5 && !self.demo_done {
+        if (std::env::var("SYLLABARY_DEMO_FONTS").is_ok() || std::env::var("SCRIBE_DEMO_FONTS").is_ok()) && ui.input(|i| i.time) > 0.5 && !self.demo_done {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
             self.demo_done = true;
         }

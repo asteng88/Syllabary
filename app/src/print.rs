@@ -132,7 +132,7 @@ pub fn submit_cups_print_job(ctx: &egui::Context, doc: &Document, book: &FontBoo
         Some((f, t))
     };
     let bytes = crate::pdf::export_page_range(ctx, doc, book, range);
-    let dir = std::env::temp_dir().join("ScribePro");
+    let dir = std::env::temp_dir().join("Syllabary");
     let _ = std::fs::create_dir_all(&dir);
     let safe_title: String = title
         .chars()
@@ -154,7 +154,7 @@ pub fn submit_cups_print_job(ctx: &egui::Context, doc: &Document, book: &FontBoo
         .arg("-n")
         .arg(cfg.copies.max(1).to_string())
         .arg("-t")
-        .arg(if title.is_empty() { "Scribe Pro Document" } else { title })
+        .arg(if title.is_empty() { "Syllabary Document" } else { title })
         .arg("-o")
         .arg(if cfg.color { "print-color-mode=color" } else { "print-color-mode=monochrome" })
         .arg("-o")
@@ -180,7 +180,7 @@ pub fn submit_cups_print_job(ctx: &egui::Context, doc: &Document, book: &FontBoo
         .arg("-#")
         .arg(cfg.copies.max(1).to_string())
         .arg("-J")
-        .arg(if title.is_empty() { "Scribe Pro Document" } else { title })
+        .arg(if title.is_empty() { "Syllabary Document" } else { title })
         .arg("-o")
         .arg(if cfg.color { "ColorModel=RGB" } else { "ColorModel=Gray" })
         .arg("-o")
@@ -207,7 +207,7 @@ pub fn submit_cups_print_job(ctx: &egui::Context, doc: &Document, book: &FontBoo
 /// Opens the calibrated WYSIWYG PDF in the native OS viewer/print sheet (e.g. macOS Preview).
 pub fn open_system_print_preview(ctx: &egui::Context, doc: &Document, book: &FontBook, title: &str) -> PrintOutcome {
     let bytes = crate::pdf::export(ctx, doc, book);
-    let dir = std::env::temp_dir().join("ScribePro");
+    let dir = std::env::temp_dir().join("Syllabary");
     let _ = std::fs::create_dir_all(&dir);
     let safe_title: String = title
         .chars()
@@ -304,7 +304,7 @@ pub fn print_native_windows(ctx: &egui::Context, doc: &Document, book: &FontBook
         (hr, vr, pw, ph, ox, oy)
     };
 
-    let doc_title = if title.trim().is_empty() { "Scribe Pro Document" } else { title.trim() };
+    let doc_title = if title.trim().is_empty() { "Syllabary Document" } else { title.trim() };
     let wide_title: Vec<u16> = doc_title.encode_utf16().chain(core::iter::once(0)).collect();
     let di = DOCINFOW {
         cbSize: core::mem::size_of::<DOCINFOW>() as i32,

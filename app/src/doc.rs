@@ -2753,7 +2753,7 @@ pub const FILE_EXT: &str = "wpx";
 
 pub fn to_json(doc: &Document) -> String {
     let fd = FileDoc {
-        format: "scribe-pro-document".into(),
+        format: "syllabary-document".into(),
         version: 1,
         page: doc.page,
         header: doc.header.clone(),
@@ -3093,7 +3093,7 @@ pub fn to_gdoc(doc: &Document) -> String {
     let mut val: serde_json::Value = serde_json::from_str(&to_json(doc)).unwrap_or_else(|_| serde_json::json!({}));
     val["format"] = serde_json::json!("google-docs-document");
     val["title"] = serde_json::json!(title);
-    val["doc_id"] = serde_json::json!("scribe-pro-gdoc");
+    val["doc_id"] = serde_json::json!("syllabary-gdoc");
     val["documentStyle"] = doc_style;
     val["inlineObjects"] = serde_json::Value::Object(inline_objects);
     val["body"] = serde_json::json!({ "content": content });
@@ -3102,7 +3102,7 @@ pub fn to_gdoc(doc: &Document) -> String {
 
 pub fn from_gdoc(s: &str) -> Result<Document, String> {
     let v: serde_json::Value = serde_json::from_str(s).map_err(|e| e.to_string())?;
-    // 1. Native Scribe Pro / hybrid .gdoc with lossless `paras` array
+    // 1. Native Syllabary / hybrid .gdoc with lossless `paras` array
     if v.get("paras").and_then(|p| p.as_array()).is_some() {
         return from_json(s);
     }
@@ -3924,7 +3924,7 @@ pub fn to_rtf(doc: &Document) -> String {
     ));
     if !doc.tables.is_empty() {
         if let Ok(tbl_json) = serde_json::to_vec(&doc.tables) {
-            out.push_str(&format!("{{\\*\\scribetbls {}}}", base64_encode(&tbl_json)));
+            out.push_str(&format!("{{\\*\\syllabarytbls {}}}", base64_encode(&tbl_json)));
         }
     }
     for (pi, p) in doc.paras.iter().enumerate() {
@@ -4319,7 +4319,7 @@ pub fn from_rtf(src: &str) -> Document {
                     "pagebb" => doc.paras[pos.p].fmt.page_break_before = true,
                     "brdrb" => doc.paras[pos.p].fmt.hr = true,
                     "bpreset" => doc.paras[pos.p].fmt.bullet_preset = num.unwrap_or(0).clamp(0, 255) as u8,
-                    "scribetbls" => {
+                    "syllabarytbls" | "scribetbls" => {
                         in_scribetbls = true;
                         skip = true;
                     }
@@ -4584,7 +4584,7 @@ mod tests {
     fn make_reference_document(seed: usize) -> Document {
         let styles = named_styles();
         let mut d = Document { paras: Vec::new(), ..Default::default() };
-        d.info.title = format!("Scribe Pro Layout Benchmark Document #{seed:02}");
+        d.info.title = format!("Syllabary Layout Benchmark Document #{seed:02}");
         d.info.author = "Layout Verification Suite".into();
         d.info.subject = format!("Format Fidelity Test {seed}");
 
@@ -4811,7 +4811,7 @@ mod tests {
                 ..ParaFmt::default()
             },
         );
-        let lid = d.add_link("https://example.com/scribepro-spec");
+        let lid = d.add_link("https://example.com/syllabary-spec");
         let link_chr = CharStyle {
             color: [11, 87, 208],
             underline: true,
@@ -5002,7 +5002,7 @@ mod tests {
         for i in 0..50 {
             let ref_doc = make_reference_document(i);
 
-            // 1. Native Scribe Pro (.wpx) — 50 documents
+            // 1. Native Syllabary (.wpx) — 50 documents
             let wpx_str = to_json(&ref_doc);
             let wpx_doc = from_json(&wpx_str).expect("wpx parse");
             assert_pinpoint_layout_match(&ctx, &book, &ref_doc, &wpx_doc, ".wpx", i);

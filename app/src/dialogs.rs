@@ -513,7 +513,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 ui.label(RichText::new("Recovery copies stay on this computer only.").weak());
                 ui.add_space(6.0);
                 ui.heading("Privacy");
-                ui.label("Scribe Pro works 100% offline: it never connects to the internet.");
+                ui.label("Syllabary works 100% offline: it never connects to the internet.");
             });
             if cfg.dark != app.cfg.dark {
                 app.act(Action::ToggleDark);
@@ -666,8 +666,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             }
         }
         Dialog::About => {
-            window("About Scribe Pro").open(&mut open).show(ctx, |ui| {
-                ui.heading("Scribe Pro — Google Docs Edition");
+            window("About Syllabary").open(&mut open).show(ctx, |ui| {
+                ui.heading("Syllabary — Offline Studio Edition");
                 ui.label("A fast, offline desktop word processor featuring the Google Docs menu structure, Material Design 3 pill toolbar, and modern productivity tools.");
                 ui.add_space(6.0);
                 ui.label("• Search the menus (Alt+/) & @ Smart Chips / Building Blocks");
@@ -1091,7 +1091,7 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         (Icon::New, "Window > Next document tab", "Ctrl+Tab", Action::NextTab),
         (Icon::Close, "Window > Close all tabs", "", Action::CloseAll),
         (Icon::Shortcuts, "Help > Keyboard shortcuts", "Ctrl+/", Action::Dialog(Dialog::Shortcuts)),
-        (Icon::About, "Help > About Scribe Pro", "", Action::Dialog(Dialog::About)),
+        (Icon::About, "Help > About Syllabary", "", Action::Dialog(Dialog::About)),
     ];
 
     let mut trigger: Option<Action> = None;
@@ -2080,7 +2080,7 @@ fn page_setup(app: &mut App, ctx: &egui::Context, open: &mut bool, now: f64) {
 fn design_sheet_dialog(ctx: &egui::Context, open: &mut bool) {
     let light = crate::theme::Theme::light();
     let dark = crate::theme::Theme::dark();
-    egui::Window::new("Scribe Pro — Studio UI & Duotone Icon Design Sheet (Light & Dark Themes)")
+    egui::Window::new("Syllabary — Studio UI & Duotone Icon Design Sheet (Light & Dark Themes)")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))

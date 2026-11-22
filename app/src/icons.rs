@@ -1,4 +1,4 @@
-//! Hand-crafted duotone vector icon suite for Scribe Pro.
+//! Hand-crafted duotone vector icon suite for Syllabary.
 //! Every icon combines soft translucent accent fills, smooth cubic Bezier curves,
 //! and precision vector geometry tuned for both Light and Dark themes.
 
@@ -105,7 +105,7 @@ impl Icon {
 
     pub const ALL: &'static [(Self, &'static str, &'static str)] = &[
         // Brand & Files
-        (Self::DocsLogo, "Scribe Crest", "Brand & Files"),
+        (Self::DocsLogo, "Syllabary Crest", "Brand & Files"),
         (Self::New, "New Document", "Brand & Files"),
         (Self::Open, "Open File", "Brand & Files"),
         (Self::Save, "Save", "Brand & Files"),
@@ -254,7 +254,7 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, fg: Color32, accent: Color32) {
 
     match icon {
         Icon::DocsLogo => {
-            // Bespoke Scribe Studio crest: rounded indigo squircle with fountain nib & page lines
+            // Bespoke Syllabary Studio crest: rounded indigo squircle with fountain nib & page lines
             let badge = r.shrink(s * 0.04);
             p.rect_filled(badge, s * 0.24, accent);
             let inner_glow = Rect::from_min_max(badge.min + vec2(1.0, 1.0), pos2(badge.max.x - 1.0, badge.center().y));

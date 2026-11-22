@@ -1033,7 +1033,7 @@ fn write_pdf(pages: &[Page], pw: f32, ph: f32, title: &str, author: &str) -> Vec
     obj(&mut out, &mut offsets, b"<< /Type /Catalog /Pages 2 0 R >>");
     let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", page0 + i * stride)).collect();
     obj(&mut out, &mut offsets, format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()).as_bytes());
-    let mut info = b"<< /Producer (Scribe Pro) ".to_vec();
+    let mut info = b"<< /Producer (Syllabary) ".to_vec();
     if !title.is_empty() {
         info.extend_from_slice(b"/Title ");
         info.extend_from_slice(&pdf_string(title));
