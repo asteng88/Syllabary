@@ -1106,7 +1106,7 @@ fn glyph_name_to_str(name: &str) -> Option<&'static str> {
 
 #[derive(Clone, Default)]
 struct PdfFont {
-    font_idx: u8,
+    font_idx: u16,
     bold: bool,
     italic: bool,
     two_byte: bool,
@@ -1552,7 +1552,7 @@ struct TextSpan {
     x: f32,
     y: f32,
     width: f32,
-    font: u8,
+    font: u16,
     size: f32,
     bold: bool,
     italic: bool,
@@ -3586,7 +3586,7 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                             dimg.width_in *= s;
                             dimg.height_in *= s;
                         }
-                        let (align, indent) = infer_box_align_and_indent(
+                        let (align, left_in) = infer_box_align_and_indent(
                             img.x,
                             img.x + img.w,
                             content_left,
@@ -3599,7 +3599,7 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                             ParaFmt {
                                 image_id: id,
                                 align,
-                                indent,
+                                left_in,
                                 space_before: if page_has_emitted { gap_pt } else { 0.0 },
                                 page_break_before: pb,
                                 ..ParaFmt::default()
@@ -4096,25 +4096,24 @@ fn infer_box_align_and_indent(
     content_left: f32,
     content_right: f32,
     content_w: f32,
-) -> (Align, u8) {
+) -> (Align, f32) {
     let w = (x1 - x0).max(0.0);
     if w >= content_w * 0.88 {
-        return (Align::Center, 0);
+        return (Align::Center, 0.0);
     }
     let left_gap = (x0 - content_left).max(0.0);
     let right_gap = (content_right - x1).max(0.0);
     let mid_diff = ((x0 + x1) * 0.5 - (content_left + content_right) * 0.5).abs();
     if mid_diff <= 18.0 && left_gap > 16.0 && right_gap > 16.0 {
-        (Align::Center, 0)
+        (Align::Center, 0.0)
     } else if right_gap <= 20.0 && left_gap > 32.0 {
-        (Align::Right, 0)
+        (Align::Right, 0.0)
     } else {
-        let indent = if left_gap > 20.0 {
-            (left_gap / 36.0).round().clamp(0.0, 6.0) as u8
-        } else {
-            0
-        };
-        (Align::Left, indent)
+        // exact offset from the text column, in inches
+        (
+            Align::Left,
+            if left_gap > 2.0 { left_gap / 72.0 } else { 0.0 },
+        )
     }
 }
 
@@ -6512,6 +6511,8 @@ fn build_line_items(
 ) {
     let mut prev_line: Option<&LineGroup> = None;
     let mut cur_para: Option<(Para, f32, f32, f32)> = None; // (para, top_y, bot_y, est_h)
+    let mut cur_first_x = 0.0f32;
+    let mut cur_lines = 0usize;
 
     let mut i = 0usize;
     while i < lines.len() {
@@ -6632,28 +6633,65 @@ fn build_line_items(
                 });
             }
             let first_style = span_to_char_style(&adjusted_spans[0]);
-            let indent = if list_kind == ListKind::None && lg.min_x > content_left + 18.0 && align == Align::Left {
-                ((lg.min_x - content_left) / 36.0).round().clamp(0.0, 6.0) as u8
+            // Exact indents: the text column offset, and for lists the marker → text hang.
+            let (left_in, first_in) = if matches!(align, Align::Left | Align::Justify) {
+                let marker_x = lg.min_x;
+                if list_kind != ListKind::None {
+                    let prefix_chars: usize = strip_chars;
+                    let text_x = if lg.spans.len() >= 2
+                        && lg.spans[0].text.trim().chars().count() <= prefix_chars
+                    {
+                        lg.spans[1].x
+                    } else {
+                        marker_x + (lg.size * 1.5).max(14.0)
+                    };
+                    (
+                        ((text_x - content_left).max(0.0)) / 72.0,
+                        (marker_x - text_x).min(0.0) / 72.0,
+                    )
+                } else if marker_x > content_left + 2.0 {
+                    ((marker_x - content_left) / 72.0, 0.0)
+                } else {
+                    (0.0, 0.0)
+                }
             } else {
-                0
+                (0.0, 0.0)
             };
             let fmt = ParaFmt {
                 align,
-                indent,
+                left_in,
+                first_in,
                 list: list_kind,
                 checked,
                 shading: banner_shading,
                 ..ParaFmt::default()
             };
+            cur_first_x = lg.min_x;
+            cur_lines = 1;
             cur_para = Some((Para::new(first_style, fmt), line_top, line_bot, line_est_h));
         } else if let Some((ref mut p, _, ref mut by, ref mut eh)) = cur_para {
             if let Some(prev) = prev_line {
-                let ls = ((prev.y - lg.y) / (lg.size * 1.20)).clamp(0.95, 1.80);
+                let pitch = prev.y - lg.y;
+                let ls = (pitch / (lg.size * 1.20)).clamp(0.95, 1.80);
                 p.fmt.line_spacing = ls;
-                *eh += lg.size * 1.20 * ls;
+                // reproduce the PDF's baseline-to-baseline distance exactly
+                p.fmt.line_exact_pt = pitch.clamp(lg.size * 0.8, lg.size * 3.0);
+                *eh += pitch.max(lg.size);
             } else {
                 *eh += line_est_h;
             }
+            // first line indented (or outdented) relative to the rest: first-line / hanging indent
+            if cur_lines == 1
+                && p.fmt.list == ListKind::None
+                && matches!(p.fmt.align, Align::Left | Align::Justify)
+            {
+                let body_x = lg.min_x;
+                if (cur_first_x - body_x).abs() > 2.0 {
+                    p.fmt.left_in = ((body_x - content_left).max(0.0)) / 72.0;
+                    p.fmt.first_in = (cur_first_x - body_x.max(content_left)) / 72.0;
+                }
+            }
+            cur_lines += 1;
             *by = (*by).min(line_bot);
             if !p.text.is_empty() && !p.text.ends_with(&[' ', '-']) {
                 let st = p.end_style;

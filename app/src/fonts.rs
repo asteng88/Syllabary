@@ -45,7 +45,7 @@ fn files_for(name: &str) -> [&'static str; 4] {
     }
 }
 
-fn base_font_category(i: u8) -> FontCat {
+fn base_font_category(i: u16) -> FontCat {
     match i {
         0 | 3 | 4 | 5 | 6 | 7 | 14..=19 => FontCat::Serif,
         12 | 13 | 27 | 28 => FontCat::Mono,
@@ -503,7 +503,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
         // 0..31: keep the 31 built-in/bundled fonts at their exact indices.
         for (fi, &name) in FONT_NAMES.iter().enumerate() {
             let mut files: [Option<PathBuf>; 4] = [None, None, None, None];
-            if let Some(folder) = bundled_folder(fi as u8) {
+            if let Some(folder) = bundled_folder(fi as u16) {
                 if let Some(bdir) = bundled.as_ref() {
                     for (v, fname) in ["regular.ttf", "bold.ttf", "italic.ttf", "bolditalic.ttf"].iter().enumerate() {
                         let p = bdir.join(folder).join(fname);
@@ -525,7 +525,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
             }
             entries.push(CatalogEntry {
                 name,
-                cat: base_font_category(fi as u8),
+                cat: base_font_category(fi as u16),
                 files,
                 data: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
             });
@@ -564,7 +564,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
         }
 
         for (_, mut d) in extra {
-            if entries.len() >= 255 {
+            if entries.len() >= u16::MAX as usize {
                 break;
             }
             if d.files[0].is_none() {
@@ -590,13 +590,13 @@ pub fn catalog() -> &'static [CatalogEntry] {
 #[derive(Default, Clone)]
 pub struct FontBook {
     /// key: (font index, variant 0..4) → egui family name, or None when missing.
-    pub faces: HashMap<(u8, u8), Option<String>>,
+    pub faces: HashMap<(u16, u8), Option<String>>,
     pub ui_loaded: bool,
 }
 
 impl FontBook {
     /// Returns the family to use and whether italics must be synthesised.
-    pub fn family(&self, font: u8, bold: bool, italic: bool) -> (FontFamily, bool) {
+    pub fn family(&self, font: u16, bold: bool, italic: bool) -> (FontFamily, bool) {
         let v = (bold as u8) | ((italic as u8) << 1);
         if let Some(Some(name)) = self.faces.get(&(font, v)) {
             return (FontFamily::Name(name.clone().into()), false);
@@ -695,10 +695,10 @@ pub fn install(ctx: &egui::Context) -> FontBook {
                     chain.extend(fallbacks.iter().cloned());
                     chain.extend(egui_defaults.iter().cloned());
                     defs.families.insert(FontFamily::Name(key.clone().into()), chain);
-                    book.faces.insert((fi as u8, v), Some(key));
+                    book.faces.insert((fi as u16, v), Some(key));
                 }
                 None => {
-                    book.faces.insert((fi as u8, v), None);
+                    book.faces.insert((fi as u16, v), None);
                 }
             }
         }
@@ -746,7 +746,7 @@ mod tests {
                 for (fi, entry) in catalog().iter().enumerate() {
                     let name = entry.name;
                     for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
-                        let (fam, _) = book.family(fi as u8, bold, italic);
+                        let (fam, _) = book.family(fi as u16, bold, italic);
                         for pt in [9.0, 10.0, 11.0, 12.0, 14.0, 16.0] {
                             let mut job = egui::text::LayoutJob::default();
                             job.append(

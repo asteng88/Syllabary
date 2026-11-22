@@ -7,7 +7,10 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
-use crate::doc::{lerp_rgb, Align, CellBorders, CellVAlign, CharStyle, Document, ListKind, Para, TableCellSpec};
+use crate::doc::{
+    lerp_rgb, Align, CellBorders, CellVAlign, CharStyle, Document, ListKind, Para, TabKind,
+    TabStop, TableCellSpec,
+};
 use crate::fonts::FontBook;
 
 /// egui points per inch at 100 % zoom.
@@ -36,6 +39,8 @@ pub struct Line {
     pub last_in_para: bool,
     pub marker: Option<Arc<Galley>>,
     pub marker_x: f32,
+    /// Tab leaders to paint on this line.
+    pub leaders: Vec<Leader>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +258,453 @@ pub fn image_box(doc: &Document, image_id: u64, avail_w: f32, ppi: f32) -> Optio
     Some((img_w, img_h, cap_h, total_h))
 }
 
+/// A tab leader (dots / dashes / line) painted across the gap a tab opened.
+#[derive(Clone, Copy, Debug)]
+pub struct Leader {
+    /// Start / end x relative to the line's `x`.
+    pub x0: f32,
+    pub x1: f32,
+    /// Baseline y relative to the line's top.
+    pub baseline: f32,
+    /// 1 = dots, 2 = dashes, 3 = solid line, 4 = middle dots
+    pub kind: u8,
+    pub color: [u8; 3],
+    /// Font size in layout points (zoomed).
+    pub size: f32,
+}
+
+/// Character style used to draw the header (`footer == false`) or footer text.
+pub fn hf_style(doc: &Document, footer: bool) -> CharStyle {
+    let (st, italic) = if footer {
+        (doc.footer_style, doc.footer_italic)
+    } else {
+        (doc.header_style, doc.header_italic)
+    };
+    match st {
+        Some(s) => CharStyle {
+            italic: s.italic || italic,
+            link: 0,
+            ..s
+        },
+        None => CharStyle {
+            font: 0,
+            size: 10.0,
+            color: [95, 95, 95],
+            italic,
+            ..CharStyle::default()
+        },
+    }
+}
+
+/// Header / footer galley in the document's own font, size and color.
+pub fn hf_galley(
+    fonts: &mut egui::epaint::text::FontsView<'_>,
+    book: &FontBook,
+    doc: &Document,
+    footer: bool,
+    text: &str,
+    ppi: f32,
+) -> Arc<Galley> {
+    let st = hf_style(doc, footer);
+    let mut job = LayoutJob::default();
+    job.append(text, 0.0, text_format(book, &st, ppi));
+    fonts.layout_job(job)
+}
+
+/// Top y of the header text and of the footer text on a page of height `page_h` (layout points).
+pub fn hf_y(doc: &Document, lay: &PageLayout, footer: bool, galley_h: f32) -> f32 {
+    let ppi = lay.ppi;
+    let scale = ppi / BASE_PPI;
+    if footer {
+        if doc.footer_dist_in > 0.0 {
+            (lay.page_size.y - doc.footer_dist_in * ppi - galley_h).max(0.0)
+        } else {
+            let bottom_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y)
+                .max(galley_h + 4.0 * scale);
+            let pt = ppi / 72.0;
+            lay.page_size.y
+                - (bottom_margin * 0.42 + galley_h * 0.5)
+                    .clamp(galley_h + 3.0 * scale, 30.0 * pt + galley_h * 0.5)
+        }
+    } else if doc.header_dist_in > 0.0 {
+        doc.header_dist_in * ppi
+    } else {
+        (lay.content_offset.y * 0.5 - galley_h * 0.5).max(3.0 * scale)
+    }
+}
+
+/// Filled marks `(rect, corner radius, color)` relative to the line origin that draw the
+/// line's tab leaders, so the screen and PDF renderers paint identical dots / dashes / rules.
+pub fn leader_marks(line: &Line) -> Vec<(Rect, f32, [u8; 3])> {
+    let mut out = Vec::new();
+    for ld in &line.leaders {
+        let y = ld.baseline;
+        let w = (ld.size / 16.0).max(0.8);
+        match ld.kind {
+            3 => out.push((
+                Rect::from_min_max(Pos2::new(ld.x0, y + 0.5), Pos2::new(ld.x1, y + 0.5 + w)),
+                0.0,
+                ld.color,
+            )),
+            2 => {
+                let step = ld.size * 0.5;
+                let mut x = ld.x0 + step * 0.25;
+                let yy = y - ld.size * 0.25;
+                while x + step * 0.5 <= ld.x1 {
+                    out.push((
+                        Rect::from_min_max(
+                            Pos2::new(x, yy - w * 0.5),
+                            Pos2::new(x + step * 0.5, yy + w * 0.5),
+                        ),
+                        0.0,
+                        ld.color,
+                    ));
+                    x += step;
+                }
+            }
+            _ => {
+                let step = ld.size * 0.3;
+                let r = (ld.size * 0.05).max(0.6);
+                let cy = if ld.kind == 4 {
+                    y - ld.size * 0.3
+                } else {
+                    y - r
+                };
+                let mut x = ld.x0 + step * 0.5;
+                while x + r <= ld.x1 - step * 0.3 {
+                    out.push((
+                        Rect::from_center_size(Pos2::new(x, cy), Vec2::splat(r * 2.0)),
+                        r,
+                        ld.color,
+                    ));
+                    x += step;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Horizontal extent `(x0, x1)` of paragraph `pi`'s text block relative to the content box,
+/// used for paragraph shading and borders (from the left indent to the right indent).
+pub fn para_block_x(doc: &Document, lay: &PageLayout, pi: usize) -> (f32, f32) {
+    let f = doc.paras[pi].fmt;
+    let x0 = doc.block_left_in(&f) * lay.ppi;
+    let x1 = lay.content_size.x - f.right_in * lay.ppi;
+    (x0, x1.max(x0 + 4.0))
+}
+
+/// Filled rects `(rect, color)` relative to the content box origin that draw the paragraph
+/// borders crossing `line`. Consecutive paragraphs with identical borders form one box.
+pub fn para_border_rects(doc: &Document, lay: &PageLayout, line: &Line) -> Vec<(Rect, [u8; 3])> {
+    let pi = line.para;
+    let f = doc.paras[pi].fmt;
+    let b = f.pborders;
+    if b.is_empty() || f.table_id > 0 {
+        return Vec::new();
+    }
+    let same = |q: usize| {
+        let g = doc.paras[q].fmt;
+        g.pborders == b && g.left_in == f.left_in && g.right_in == f.right_in && g.table_id == 0
+    };
+    let opens = line.first_in_para && (pi == 0 || !same(pi - 1));
+    let closes = line.last_in_para && (pi + 1 >= doc.paras.len() || !same(pi + 1));
+    let pt = lay.ppi / 72.0;
+    let (bx0, bx1) = para_block_x(doc, lay, pi);
+    let pad = 4.0 * pt;
+    let x0 = bx0 - pad;
+    let x1 = bx1 + pad;
+    let mut y0 = line.y;
+    let mut y1 = line.y + line.height;
+    if line.first_in_para {
+        y0 -= if opens { 1.0 * pt } else { f.space_before * pt };
+    }
+    if line.last_in_para {
+        y1 += if closes { 1.0 * pt } else { f.space_after * pt };
+    }
+    let mut out = Vec::new();
+    let wpx = |s: &crate::doc::BorderSpec| (s.width_pt * pt).max(0.75);
+    if let (Some(s), true) = (b.top, opens) {
+        out.push((
+            Rect::from_min_max(Pos2::new(x0, y0 - wpx(&s)), Pos2::new(x1, y0)),
+            s.color,
+        ));
+    }
+    if let (Some(s), true) = (b.bottom, closes) {
+        out.push((
+            Rect::from_min_max(Pos2::new(x0, y1), Pos2::new(x1, y1 + wpx(&s))),
+            s.color,
+        ));
+    }
+    if let Some(s) = b.left {
+        out.push((
+            Rect::from_min_max(Pos2::new(x0 - wpx(&s), y0), Pos2::new(x0, y1)),
+            s.color,
+        ));
+    }
+    if let Some(s) = b.right {
+        out.push((
+            Rect::from_min_max(Pos2::new(x1, y0), Pos2::new(x1 + wpx(&s), y1)),
+            s.color,
+        ));
+    }
+    out
+}
+
+/// Builds the layout job for `para.text[from..to]` with the given leading space after each tab.
+fn build_job(
+    book: &FontBook,
+    para: &Para,
+    from: usize,
+    to: usize,
+    leads: &[(usize, f32)],
+    ppi: f32,
+    style_for: &dyn Fn(&CharStyle) -> CharStyle,
+) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    if from >= to {
+        let s = if para.text.is_empty() {
+            para.end_style
+        } else {
+            para.style_at(from)
+        };
+        job.append(" ", 0.0, text_format(book, &style_for(&s), ppi));
+        return job;
+    }
+    let mut buf = String::new();
+    let mut cur: Option<(CharStyle, bool)> = None;
+    let mut pending_lead = 0.0f32;
+    let flush =
+        |job: &mut LayoutJob, buf: &mut String, cur: &Option<(CharStyle, bool)>, lead: &mut f32| {
+            if buf.is_empty() {
+                return;
+            }
+            if let Some((s, small)) = cur {
+                let mut tf = text_format(book, s, ppi);
+                if *small {
+                    tf.font_id.size *= 0.8;
+                }
+                if s.spacing_pt != 0.0 {
+                    tf.extra_letter_spacing = s.spacing_pt * ppi / 72.0;
+                }
+                job.append(buf, *lead, tf);
+            }
+            *lead = 0.0;
+            buf.clear();
+        };
+    for i in from..to {
+        let raw = para.text[i];
+        let st = style_for(&para.styles[i]);
+        let mut ch = if raw == '\t' { ' ' } else { raw };
+        let mut small = false;
+        if st.caps != 0 && ch.is_lowercase() {
+            let mut up = ch.to_uppercase();
+            if let (Some(u), None) = (up.next(), up.next()) {
+                ch = u;
+                small = st.caps == 2;
+            }
+        }
+        let key = (st, small);
+        let lead_here = if i > from && para.text[i - 1] == '\t' {
+            leads.iter().find(|(t, _)| *t == i - 1).map(|(_, l)| *l)
+        } else {
+            None
+        };
+        if cur != Some(key) || lead_here.is_some() {
+            flush(&mut job, &mut buf, &cur, &mut pending_lead);
+            cur = Some(key);
+            if let Some(l) = lead_here {
+                pending_lead = l;
+            }
+        }
+        buf.push(ch);
+    }
+    flush(&mut job, &mut buf, &cur, &mut pending_lead);
+    job
+}
+
+/// For each char in `from..to`, its `(row, glyph)` in `galley` (None for consumed newlines).
+fn char_glyph_map(
+    galley: &Galley,
+    para: &Para,
+    from: usize,
+    to: usize,
+) -> Vec<Option<(usize, usize)>> {
+    let mut map = vec![None; to.saturating_sub(from)];
+    if from >= to {
+        return map;
+    }
+    let mut c = from;
+    for (r, placed) in galley.rows.iter().enumerate() {
+        for g in 0..placed.row.glyphs.len() {
+            if c < to {
+                map[c - from] = Some((r, g));
+            }
+            c += 1;
+        }
+        if placed.ends_with_newline && para.text.get(c) == Some(&'\n') {
+            c += 1;
+        }
+    }
+    map
+}
+
+/// Next tab stop strictly right of `x` (layout points from the column's left edge).
+fn next_tab_stop(
+    x: f32,
+    tabs: &[TabStop],
+    hang_stop: Option<f32>,
+    default_px: f32,
+    ppi: f32,
+) -> (f32, TabKind, u8) {
+    let mut best: Option<(f32, TabKind, u8)> = tabs
+        .iter()
+        .find(|t| t.pos_in * ppi > x + 0.5)
+        .map(|t| (t.pos_in * ppi, t.kind, t.leader));
+    if let Some(h) = hang_stop {
+        if h > x + 0.5 && best.is_none_or(|b| h < b.0) {
+            best = Some((h, TabKind::Left, 0));
+        }
+    }
+    best.unwrap_or_else(|| {
+        let last = tabs.last().map_or(0.0, |t| t.pos_in * ppi);
+        let base = x.max(last);
+        let step = default_px.max(4.0);
+        (
+            (((base + 0.5) / step).floor() + 1.0) * step,
+            TabKind::Left,
+            0,
+        )
+    })
+}
+
+struct Shaped {
+    galley: Arc<Galley>,
+    /// `(row, leader)` pairs with x relative to the galley's left edge.
+    leaders: Vec<(usize, Leader)>,
+}
+
+/// Lays out `para.text[from..to]` in a column starting `row_x` from the column's left edge,
+/// resolving tab stops (left / center / right / decimal, with leaders) by iterative relayout.
+#[allow(clippy::too_many_arguments)]
+fn shape_range(
+    fonts: &mut egui::epaint::text::FontsView<'_>,
+    doc: &Document,
+    book: &FontBook,
+    para: &Para,
+    from: usize,
+    to: usize,
+    row_x: f32,
+    width: f32,
+    wrap: bool,
+    hang_stop: Option<f32>,
+    ppi: f32,
+    style_for: &dyn Fn(&CharStyle) -> CharStyle,
+) -> Shaped {
+    let fmt = para.fmt;
+    let tab_chars: Vec<usize> = (from..to).filter(|&i| para.text[i] == '\t').collect();
+    let mut leads: Vec<(usize, f32)> = tab_chars.iter().map(|&t| (t, 0.0)).collect();
+    let make = |fonts: &mut egui::epaint::text::FontsView<'_>, leads: &[(usize, f32)]| {
+        let mut job = build_job(book, para, from, to, leads, ppi, style_for);
+        job.wrap = TextWrapping {
+            max_width: if wrap { width.max(8.0) } else { f32::INFINITY },
+            ..Default::default()
+        };
+        job.justify = fmt.align == Align::Justify;
+        job.keep_trailing_whitespace = true;
+        fonts.layout_job(job)
+    };
+    let mut galley = make(fonts, &leads);
+    let mut leaders = Vec::new();
+    if tab_chars.is_empty() {
+        return Shaped { galley, leaders };
+    }
+    let default_px = doc.default_tab_in.max(0.05) * ppi;
+    for _ in 0..8 {
+        let map = char_glyph_map(&galley, para, from, to);
+        let mut next: Vec<(usize, f32)> = Vec::with_capacity(tab_chars.len());
+        let mut lds = Vec::new();
+        for &ti in &tab_chars {
+            let old = leads
+                .iter()
+                .find(|(t, _)| *t == ti)
+                .map_or(0.0, |(_, l)| *l);
+            let Some((r, g)) = map[ti - from] else {
+                next.push((ti, old));
+                continue;
+            };
+            let glyphs = &galley.rows[r].row.glyphs;
+            let gl = &glyphs[g];
+            let tab_start = gl.pos.x;
+            let tab_end = gl.pos.x + gl.advance_width;
+            let (stop, kind, leader) = next_tab_stop(
+                row_x + tab_start,
+                fmt.tabs.as_slice(),
+                hang_stop,
+                default_px,
+                ppi,
+            );
+            // Width of the text that follows, up to the next tab or the row's end.
+            let seg_start = glyphs.get(g + 1).map_or(tab_end + old, |n| n.pos.x);
+            let mut seg_end = seg_start;
+            let mut dec_x: Option<f32> = None;
+            let mut ci = ti + 1;
+            for n in glyphs.iter().skip(g + 1) {
+                if para.text.get(ci) == Some(&'\t') {
+                    break;
+                }
+                if dec_x.is_none() && (n.chr == '.' || n.chr == ',') {
+                    dec_x = Some(n.pos.x);
+                }
+                if !n.chr.is_whitespace() {
+                    seg_end = n.pos.x + n.advance_width;
+                }
+                ci += 1;
+            }
+            let seg_w = (seg_end - seg_start).max(0.0);
+            let target_rel = match kind {
+                TabKind::Left => stop,
+                TabKind::Right => stop - seg_w,
+                TabKind::Center => stop - seg_w * 0.5,
+                TabKind::Decimal => stop - dec_x.map_or(seg_w, |d| d - seg_start),
+            } - row_x;
+            let mut lead = (target_rel - tab_end).max(0.0);
+            let limit = if wrap { width } else { f32::INFINITY };
+            if kind == TabKind::Left && tab_end + lead > limit + 1.0 {
+                lead = 0.0;
+            } else if kind != TabKind::Left && tab_end + lead + seg_w > limit + 2.0 {
+                lead = (limit - seg_w - tab_end).max(0.0);
+            }
+            next.push((ti, lead));
+            if leader > 0 && lead > 2.0 {
+                let st = para.styles[ti];
+                lds.push((
+                    r,
+                    Leader {
+                        x0: tab_start,
+                        x1: tab_end + lead,
+                        baseline: gl.pos.y,
+                        kind: leader,
+                        color: st.color,
+                        size: st.size * ppi / 72.0,
+                    },
+                ));
+            }
+        }
+        let converged = next
+            .iter()
+            .zip(&leads)
+            .all(|(a, b)| (a.1 - b.1).abs() < 0.5);
+        leaders = lds;
+        if converged {
+            break;
+        }
+        leads = next;
+        galley = make(fonts, &leads);
+    }
+    Shaped { galley, leaders }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn shape_para_lines(
     fonts: &mut egui::epaint::text::FontsView<'_>,
@@ -266,12 +718,30 @@ fn shape_para_lines(
 ) -> Vec<Line> {
     let para = &doc.paras[pi];
     let fmt = para.fmt;
-    let hang = if fmt.list != ListKind::None { LIST_HANG * ppi } else { 0.0 };
-    let indent = fmt.indent as f32 * INDENT_STEP * ppi + hang;
-    let avail = (base_avail - indent).max(8.0);
+    let pt = ppi / 72.0;
+    let (left_in, first_in) = doc.indents_in(&fmt);
+    let left = left_in * ppi;
+    let first = first_in * ppi;
+    let right = fmt.right_in * ppi;
+    let rest_w = (base_avail - left - right).max(8.0);
     let mut out = Vec::new();
 
+    let line_h = |natural: f32| -> f32 {
+        if fmt.line_exact_pt > 0.0 {
+            fmt.line_exact_pt * pt
+        } else {
+            let h = natural.max(1.0) * fmt.line_spacing;
+            if fmt.line_min_pt > 0.0 {
+                h.max(fmt.line_min_pt * pt)
+            } else {
+                h
+            }
+        }
+    };
+
     if fmt.image_id > 0 {
+        let block_left = (left + first.min(0.0)).max(0.0);
+        let avail = (base_avail - block_left - right).max(8.0);
         if let Some((img_w, _img_h, _cap_h, total_h)) = image_box(doc, fmt.image_id, avail, ppi) {
             let mut job = LayoutJob::default();
             job.append(" ", 0.0, text_format(book, &para.end_style, ppi));
@@ -286,7 +756,7 @@ fn shape_para_lines(
                 start: 0,
                 end: para.len(),
                 page: 0,
-                x: base_x + indent + offset,
+                x: base_x + block_left + offset,
                 y: 0.0,
                 height: total_h,
                 galley: single_row(&galley, 0, para, 0, para.len()),
@@ -294,14 +764,15 @@ fn shape_para_lines(
                 first_in_para: true,
                 last_in_para: true,
                 marker: None,
-                marker_x: base_x + indent,
+                marker_x: base_x + block_left,
+                leaders: Vec::new(),
             });
             return out;
         }
     }
 
     let checked_checklist = fmt.list == ListKind::Checklist && fmt.checked;
-    let style_for = |s: &CharStyle| -> CharStyle {
+    let style_for = move |s: &CharStyle| -> CharStyle {
         if checked_checklist {
             CharStyle {
                 strike: true,
@@ -313,92 +784,183 @@ fn shape_para_lines(
         }
     };
 
-    let mut job = LayoutJob::default();
-    let empty = para.text.is_empty();
-    if empty {
-        job.append(" ", 0.0, text_format(book, &style_for(&para.end_style), ppi));
-    } else {
-        for (a, b, s) in para.runs() {
-            let text: String = para.text[a..b].iter().collect();
-            job.append(&text, 0.0, text_format(book, &style_for(&s), ppi));
-        }
-    }
-    job.wrap = TextWrapping {
-        max_width: if wrap_text { avail } else { f32::INFINITY },
-        ..Default::default()
-    };
-    job.justify = fmt.align == Align::Justify;
-    job.keep_trailing_whitespace = true;
-    let galley = fonts.layout_job(job);
-
+    // List marker (bullet / number / checkbox) and where the first line's text starts.
+    let mut first_x = left + first;
+    let mut marker_x = left + first;
+    let mut hang_stop = if first < -0.5 { Some(left) } else { None };
     let marker = if fmt.list != ListKind::None {
         let s = para.style_at(0);
         let text = doc.list_marker(pi);
+        let lv = doc.list_level(&fmt);
+        let mut ms = CharStyle {
+            underline: false,
+            strike: false,
+            highlight: None,
+            highlight_to: None,
+            link: 0,
+            caps: 0,
+            spacing_pt: 0.0,
+            ..s
+        };
+        if let Some(lv) = lv {
+            if let Some(f) = lv.font {
+                ms.font = f;
+            }
+            if let Some(c) = lv.color {
+                ms.color = c;
+            }
+            if let Some(sz) = lv.size {
+                ms.size = sz;
+            }
+            if let Some(b) = lv.bold {
+                ms.bold = b;
+            }
+        }
         let mut mj = LayoutJob::default();
         mj.append(
-            &text,
+            if text.is_empty() { " " } else { &text },
             0.0,
-            text_format(
-                book,
-                &CharStyle { underline: false, strike: false, highlight: None, highlight_to: None, link: 0, ..s },
-                ppi,
-            ),
+            text_format(book, &ms, ppi),
         );
-        Some(fonts.layout_job(mj))
+        let mg = fonts.layout_job(mj);
+        let mw = mg.rect.width();
+        let anchor = left + first;
+        marker_x = match lv.map_or(Align::Left, |l| l.align) {
+            Align::Right => anchor - mw,
+            Align::Center => anchor - mw * 0.5,
+            _ => anchor,
+        };
+        let m_end = marker_x + mw;
+        first_x = match lv.map_or(0, |l| l.suffix) {
+            1 => m_end + ms.size * pt * 0.28,
+            2 => m_end,
+            _ => {
+                if fmt.list_id == 0 || left > m_end + 0.5 {
+                    left.max(m_end + 2.0 * pt)
+                } else {
+                    next_tab_stop(
+                        m_end,
+                        fmt.tabs.as_slice(),
+                        None,
+                        doc.default_tab_in.max(0.05) * ppi,
+                        ppi,
+                    )
+                    .0
+                }
+            }
+        };
+        hang_stop = None;
+        Some(mg)
     } else {
         None
     };
 
-    let nrows = galley.rows.len();
-    let mut char_cursor = 0usize;
-    for r in 0..nrows {
-        let placed = &galley.rows[r];
-        let glyphs = &placed.row.glyphs;
-        let count = if empty { 0 } else { glyphs.len() };
-        let start = char_cursor.min(para.len());
-        let end = (char_cursor + count).min(para.len());
-        char_cursor += count;
-        if placed.ends_with_newline && para.text.get(char_cursor) == Some(&'\n') {
-            char_cursor += 1;
+    let n = para.len();
+    let first_w = (base_avail - right - first_x).max(8.0);
+    // Shape the first line at its own indent, then the rest of the paragraph at the left indent.
+    // Each part: (shaped, first char, row x, width, only its first row is used)
+    let mut parts: Vec<(Shaped, usize, f32, f32, bool)> = Vec::new();
+    if n == 0 {
+        let sh = shape_range(
+            fonts, doc, book, para, 0, 0, first_x, first_w, wrap_text, hang_stop, ppi, &style_for,
+        );
+        parts.push((sh, 0, first_x, first_w, false));
+    } else if (first_x - left).abs() < 0.5 {
+        let sh = shape_range(
+            fonts, doc, book, para, 0, n, left, rest_w, wrap_text, hang_stop, ppi, &style_for,
+        );
+        parts.push((sh, 0, left, rest_w, false));
+    } else {
+        let sh = shape_range(
+            fonts, doc, book, para, 0, n, first_x, first_w, wrap_text, hang_stop, ppi, &style_for,
+        );
+        let mut consumed = sh.galley.rows.first().map_or(n, |r| r.row.glyphs.len());
+        let more = sh.galley.rows.len() > 1;
+        if sh.galley.rows.first().is_some_and(|r| r.ends_with_newline)
+            && para.text.get(consumed) == Some(&'\n')
+        {
+            consumed += 1;
         }
-        let mut trimmed = 0.0f32;
-        for g in glyphs.iter().rev() {
-            if !g.chr.is_whitespace() {
-                trimmed = g.pos.x + g.advance_width;
-                break;
+        parts.push((sh, 0, first_x, first_w, true));
+        if more {
+            let from = consumed.min(n);
+            let sh2 = shape_range(
+                fonts, doc, book, para, from, n, left, rest_w, wrap_text, None, ppi, &style_for,
+            );
+            parts.push((sh2, from, left, rest_w, false));
+        }
+    }
+
+    let empty = n == 0;
+    let total_rows: usize = parts
+        .iter()
+        .map(|(s, _, _, _, only)| if *only { 1 } else { s.galley.rows.len() })
+        .sum();
+    let mut row_no = 0usize;
+    for (sh, from, row_x, avail, only_first) in &parts {
+        let galley = &sh.galley;
+        let part_empty = empty || *from >= n;
+        let nrows = if *only_first { 1 } else { galley.rows.len() };
+        let mut char_cursor = *from;
+        for r in 0..nrows {
+            let placed = &galley.rows[r];
+            let glyphs = &placed.row.glyphs;
+            let count = if part_empty { 0 } else { glyphs.len() };
+            let start = char_cursor.min(n);
+            let end = (char_cursor + count).min(n);
+            char_cursor += count;
+            if placed.ends_with_newline && para.text.get(char_cursor) == Some(&'\n') {
+                char_cursor += 1;
             }
+            let mut trimmed = 0.0f32;
+            for g in glyphs.iter().rev() {
+                if !g.chr.is_whitespace() {
+                    trimmed = g.pos.x + g.advance_width;
+                    break;
+                }
+            }
+            let offset = match fmt.align {
+                Align::Left | Align::Justify => 0.0,
+                Align::Center => ((avail - trimmed) / 2.0).max(0.0),
+                Align::Right => (avail - trimmed).max(0.0),
+            };
+            let mut xs = Vec::with_capacity(end - start + 1);
+            for k in 0..(end - start) {
+                xs.push(glyphs.get(k).map_or(0.0, |g| g.pos.x));
+            }
+            let end_x = if end > start {
+                glyphs
+                    .get(end - start - 1)
+                    .map_or(0.0, |g| g.pos.x + g.advance_width)
+            } else {
+                0.0
+            };
+            xs.push(end_x);
+            let leaders = sh
+                .leaders
+                .iter()
+                .filter(|(lr, _)| *lr == r)
+                .map(|(_, l)| *l)
+                .collect();
+            let is_first = row_no == 0;
+            out.push(Line {
+                para: pi,
+                start,
+                end,
+                page: 0,
+                x: base_x + row_x + offset,
+                y: 0.0,
+                height: line_h(placed.row.size.y),
+                galley: single_row(galley, r, para, start, end),
+                xs,
+                first_in_para: is_first,
+                last_in_para: row_no + 1 == total_rows,
+                marker: if is_first { marker.clone() } else { None },
+                marker_x: base_x + marker_x,
+                leaders,
+            });
+            row_no += 1;
         }
-        let offset = match fmt.align {
-            Align::Left | Align::Justify => 0.0,
-            Align::Center => ((avail - trimmed) / 2.0).max(0.0),
-            Align::Right => (avail - trimmed).max(0.0),
-        };
-        let mut xs = Vec::with_capacity(end - start + 1);
-        for k in 0..(end - start) {
-            xs.push(offset + glyphs.get(k).map_or(0.0, |g| g.pos.x));
-        }
-        let end_x = if end > start {
-            glyphs.get(end - start - 1).map_or(0.0, |g| g.pos.x + g.advance_width)
-        } else {
-            0.0
-        };
-        xs.push(offset + end_x);
-        let h = placed.row.size.y.max(1.0) * fmt.line_spacing;
-        out.push(Line {
-            para: pi,
-            start,
-            end,
-            page: 0,
-            x: base_x + indent + offset,
-            y: 0.0,
-            height: h,
-            galley: single_row(&galley, r, para, start, end),
-            xs: xs.iter().map(|v| v - offset).collect(),
-            first_in_para: r == 0,
-            last_in_para: r + 1 == nrows,
-            marker: if r == 0 { marker.clone() } else { None },
-            marker_x: base_x + indent - hang,
-        });
     }
     out
 }
@@ -695,10 +1257,12 @@ pub fn measure_column_autofit_width_in(
                     if p.fmt.table_id == table_id && p.fmt.table_row as usize == r_idx && p.fmt.table_col as usize == c_idx {
                         let lines = shape_para_lines(fonts, doc, book, pi, 0.0, 10_000.0, ppi, false);
                         for l in lines {
-                            let w_pts = l.xs.last().copied().unwrap_or(0.0).max(l.galley.rect.width());
-                            let indent_in = (p.fmt.indent as f32) * INDENT_STEP
-                                + if p.fmt.list != ListKind::None { LIST_HANG } else { 0.0 };
-                            let w_in = (w_pts / ppi) + pad_x + indent_in;
+                            let w_pts =
+                                l.xs.last()
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .max(l.galley.rect.width());
+                            let w_in = ((l.x + w_pts) / ppi) + pad_x + p.fmt.right_in.max(0.0);
                             max_w_in = max_w_in.max(w_in);
                         }
                     }

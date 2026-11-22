@@ -1447,9 +1447,12 @@ impl Tab {
                 }
                 if pfmt.image_id > 0 {
                     let o = lay.line_origin(l, canvas.min, canvas.width());
-                    let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
-                    let avail = (lay.content_size.x - indent).max(lay.ppi * 0.8);
-                    if let Some((img_w, img_h, _cap_h, total_h)) = layout::image_box(&self.doc, pfmt.image_id, avail, lay.ppi) {
+                    let indent = self.doc.block_left_in(&pfmt).max(0.0) * lay.ppi;
+                    let avail =
+                        (lay.content_size.x - indent - pfmt.right_in * lay.ppi).max(lay.ppi * 0.8);
+                    if let Some((img_w, img_h, _cap_h, total_h)) =
+                        layout::image_box(&self.doc, pfmt.image_id, avail, lay.ppi)
+                    {
                         let pad_top = 4.0 * (lay.ppi / 72.0);
                         let img_r = Rect::from_min_size(pos2(o.x, o.y + pad_top), vec2(img_w, img_h));
                         let full_r = Rect::from_min_size(pos2(o.x, o.y), vec2(img_w, total_h));
@@ -1941,19 +1944,9 @@ impl Tab {
             if opts.header_footer && !lay.draft {
                 let pt = lay.ppi / 72.0;
                 if !self.doc.header.is_empty() {
-                    let (fam, fake_it) = opts.book.family(0, false, self.doc.header_italic);
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(
-                        &self.doc.header,
-                        0.0,
-                        egui::text::TextFormat {
-                            font_id: egui::FontId::new(10.0 * pt, fam),
-                            color: Color32::from_gray(95),
-                            italics: fake_it,
-                            ..Default::default()
-                        },
-                    );
-                    let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                    let gal = ui.ctx().fonts_mut(|f| {
+                        layout::hf_galley(f, opts.book, &self.doc, false, &self.doc.header, lay.ppi)
+                    });
                     let gw = gal.rect.width();
                     let gh = gal.rect.height();
                     let hx = match self.doc.header_align {
@@ -1961,7 +1954,7 @@ impl Tab {
                         Align::Center => content.center().x - gw * 0.5,
                         Align::Right => (content.max.x - gw).max(content.min.x),
                     };
-                    let hy = r.min.y + (lay.content_offset.y * 0.5 - gh * 0.5).max(3.0 * opts.zoom);
+                    let hy = r.min.y + layout::hf_y(&self.doc, &lay, false, gh);
                     painter.galley(pos2(hx, hy), gal, Color32::BLACK);
                 }
                 if let Some(pf) = self.doc.resolved_page_footer(k, lay.pages) {
@@ -2024,25 +2017,16 @@ impl Tab {
                         painter.galley(pos2(fx, fy), gal, Color32::BLACK);
                     }
                 } else {
-                    let mut foot = self.doc.footer.clone();
+                    let mut foot =
+                        crate::doc::update_footer_page_nums(&self.doc.footer, k + 1, lay.pages);
                     if self.doc.page.page_numbers {
                         let pn = format!("Page {}", k + 1);
                         foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
                     }
                     if !foot.is_empty() {
-                        let (fam, fake_it) = opts.book.family(0, false, self.doc.footer_italic);
-                        let mut job = egui::text::LayoutJob::default();
-                        job.append(
-                            &foot,
-                            0.0,
-                            egui::text::TextFormat {
-                                font_id: egui::FontId::new(10.0 * pt, fam),
-                                color: Color32::from_gray(95),
-                                italics: fake_it,
-                                ..Default::default()
-                            },
-                        );
-                        let gal = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                        let gal = ui.ctx().fonts_mut(|f| {
+                            layout::hf_galley(f, opts.book, &self.doc, true, &foot, lay.ppi)
+                        });
                         let gw = gal.rect.width();
                         let gh = gal.rect.height();
                         let fx = match self.doc.footer_align {
@@ -2050,8 +2034,7 @@ impl Tab {
                             Align::Center => content.center().x - gw * 0.5,
                             Align::Right => (content.max.x - gw).max(content.min.x),
                         };
-                        let bot_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y).max(gh + 4.0);
-                        let fy = r.max.y - (bot_margin * 0.42 + gh * 0.5).clamp(gh + 3.0 * opts.zoom, 30.0 * pt + gh * 0.5);
+                        let fy = r.min.y + layout::hf_y(&self.doc, &lay, true, gh);
                         painter.galley(pos2(fx, fy), gal, Color32::BLACK);
                     }
                 }
@@ -2158,8 +2141,24 @@ impl Tab {
 
             // Paragraph background shading (e.g. Code blocks / Callouts)
             if let Some(sh) = pfmt.shading {
-                let sh_rect = Rect::from_min_size(pos2(content_x - 6.0, o.y - 1.0), vec2(lay.content_size.x + 12.0, l.height + 2.0));
+                let (bx0, bx1) = if pfmt.table_id > 0 {
+                    (0.0, lay.content_size.x)
+                } else {
+                    layout::para_block_x(&self.doc, &lay, l.para)
+                };
+                let sh_rect = Rect::from_min_size(
+                    pos2(content_x + bx0 - 6.0, o.y - 1.0),
+                    vec2(bx1 - bx0 + 12.0, l.height + 2.0),
+                );
                 painter.rect_filled(sh_rect, 4.0, layout::color(sh));
+            }
+            // Paragraph borders (Word box / top / bottom rules)
+            for (r, c) in layout::para_border_rects(&self.doc, &lay, l) {
+                painter.rect_filled(
+                    r.translate(vec2(content_x, o.y - l.y)),
+                    0.0,
+                    layout::color(c),
+                );
             }
             // Quote left accent bar
             if pfmt.style == 7 {
@@ -2179,7 +2178,8 @@ impl Tab {
 
             // Embedded image block + caption + interactive resize handles
             if pfmt.image_id > 0 && l.first_in_para {
-                let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
+                let indent =
+                    self.doc.block_left_in(&pfmt).max(0.0) * lay.ppi + pfmt.right_in * lay.ppi;
                 let cell_avail = if pfmt.table_id > 0 {
                     lay.cells
                         .iter()
@@ -2383,6 +2383,9 @@ impl Tab {
                 }
             } else {
                 painter.galley(o, l.galley.clone(), Color32::BLACK);
+            }
+            for (r, rad, c) in layout::leader_marks(l) {
+                painter.rect_filled(r.translate(o.to_vec2()), rad, layout::color(c));
             }
             if let Some(sp) = opts.speller {
                 let errs = spell_cache.entry(l.para).or_insert_with(|| self.spell_errors(sp, l.para));

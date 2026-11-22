@@ -2345,7 +2345,7 @@ pub fn combo_box_button(ui: &mut egui::Ui, th: &Theme, width: f32, text: &str, f
 }
 
 /// Toolbar button that shows the current font name in that font.
-pub fn font_button(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, font: u8) -> egui::Response {
+pub fn font_button(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, font: u16) -> egui::Response {
     let (fam, _) = book.family(font, false, false);
     let name = font_name(font);
     combo_box_button(ui, th, 154.0, name, FontId::new(14.5, fam), "Font")
@@ -2353,7 +2353,7 @@ pub fn font_button(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook,
 
 /// Searchable font list grouped by kind, each name drawn in its own typeface.
 #[expect(clippy::too_many_arguments, reason = "Immediate-mode font list popup takes UI, theme, font book, and search/selection state")]
-pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, current: u8, search: &mut String, recent: &[u8], focus: bool, max_h: f32) -> Option<u8> {
+pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, current: u16, search: &mut String, recent: &[u16], focus: bool, max_h: f32) -> Option<u16> {
     let mut picked = None;
     let width = 300.0;
     ui.set_width(width);
@@ -2363,8 +2363,8 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
     }
     let q = search.trim().to_lowercase();
     let total_fonts = font_count();
-    let available = |i: u8| book.faces.get(&(i, 0)).is_some_and(|f| f.is_some());
-    let row = |ui: &mut egui::Ui, i: u8| -> bool {
+    let available = |i: u16| book.faces.get(&(i, 0)).is_some_and(|f| f.is_some());
+    let row = |ui: &mut egui::Ui, i: u16| -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
         if i == current {
             ui.painter().rect_filled(rect, 6.0, th.active);
@@ -2393,7 +2393,7 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
     egui::ScrollArea::vertical().max_height(max_h).id_salt("font-list").show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         if q.is_empty() {
-            let rec: Vec<u8> = recent.iter().copied().filter(|i| (*i as usize) < total_fonts && available(*i)).collect();
+            let rec: Vec<u16> = recent.iter().copied().filter(|i| (*i as usize) < total_fonts && available(*i)).collect();
             if !rec.is_empty() {
                 header(ui, "Recently used");
                 for i in rec {
@@ -2405,7 +2405,7 @@ pub fn font_list(ui: &mut egui::Ui, th: &Theme, book: &crate::fonts::FontBook, c
         }
         let mut any = false;
         for cat in FontCat::ALL {
-            let mut items: Vec<u8> = (0..total_fonts.min(255) as u8)
+            let mut items: Vec<u16> = (0..total_fonts.min(u16::MAX as usize) as u16)
                 .filter(|i| font_category(*i) == cat && available(*i) && (q.is_empty() || font_name(*i).to_lowercase().contains(&q)))
                 .collect();
             items.sort_by_key(|i| font_name(*i));

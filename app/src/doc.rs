@@ -63,18 +63,18 @@ pub fn font_count() -> usize {
     crate::fonts::catalog().len()
 }
 
-pub fn font_name(i: u8) -> &'static str {
+pub fn font_name(i: u16) -> &'static str {
     let cat = crate::fonts::catalog();
     cat.get(i as usize).map_or(FONT_NAMES[DEFAULT_FONT as usize], |e| e.name)
 }
 
-pub fn font_category(i: u8) -> FontCat {
+pub fn font_category(i: u16) -> FontCat {
     let cat = crate::fonts::catalog();
     cat.get(i as usize).map_or(FontCat::Sans, |e| e.cat)
 }
 
 /// Folder name under fonts/ for a bundled font, None for the computer's own fonts.
-pub fn bundled_folder(i: u8) -> Option<&'static str> {
+pub fn bundled_folder(i: u16) -> Option<&'static str> {
     const DIRS: [&str; 17] = [
         "lora",
         "merriweather",
@@ -97,7 +97,7 @@ pub fn bundled_folder(i: u8) -> Option<&'static str> {
     (i as usize).checked_sub(14).and_then(|k| DIRS.get(k).copied())
 }
 
-pub const DEFAULT_FONT: u8 = 2; // Calibri
+pub const DEFAULT_FONT: u16 = 2; // Calibri
 pub const DEFAULT_SIZE: f32 = 12.0; // points
 pub const MIN_SIZE: f32 = 6.0;
 pub const MAX_SIZE: f32 = 96.0;
@@ -106,14 +106,23 @@ pub const SIZE_LIST: &[f32] = &[
     8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0, 48.0, 72.0,
 ];
 
-pub fn font_index(name: &str) -> u8 {
-    let mut cleaned = name.trim().trim_matches(|c| c == '"' || c == '\'' || c == ';').trim();
-    if cleaned.len() > 7 && cleaned.as_bytes()[6] == b'+' && cleaned[..6].bytes().all(|b| b.is_ascii_uppercase()) {
+pub fn font_index(name: &str) -> u16 {
+    let mut cleaned = name
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == ';')
+        .trim();
+    if cleaned.len() > 7
+        && cleaned.as_bytes()[6] == b'+'
+        && cleaned[..6].bytes().all(|b| b.is_ascii_uppercase())
+    {
         cleaned = &cleaned[7..];
     }
     let cat = crate::fonts::catalog();
-    if let Some(i) = cat.iter().position(|e| e.name.eq_ignore_ascii_case(cleaned)) {
-        return i as u8;
+    if let Some(i) = cat
+        .iter()
+        .position(|e| e.name.eq_ignore_ascii_case(cleaned))
+    {
+        return i as u16;
     }
     // Try stripping common weight/style suffixes (e.g. "Cambria Math" -> "Cambria", "Arial MT" -> "Arial")
     for suffix in [
@@ -141,7 +150,7 @@ pub fn font_index(name: &str) -> u8 {
         if cleaned.len() > suffix.len() && cleaned[cleaned.len() - suffix.len()..].eq_ignore_ascii_case(suffix) {
             let base = cleaned[..cleaned.len() - suffix.len()].trim();
             if let Some(i) = cat.iter().position(|e| e.name.eq_ignore_ascii_case(base)) {
-                return i as u8;
+                return i as u16;
             }
         }
     }
@@ -189,7 +198,7 @@ pub fn font_index(name: &str) -> u8 {
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct CharStyle {
-    pub font: u8,
+    pub font: u16,
     pub size: f32,
     pub bold: bool,
     pub italic: bool,
@@ -208,6 +217,24 @@ pub struct CharStyle {
     /// 0 = no link; >= 1 = 1-based index into `Document::links`
     #[serde(default)]
     pub link: u16,
+    /// 0 = normal, 1 = ALL CAPS, 2 = Small Caps (display only; the stored text keeps its case).
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub caps: u8,
+    /// Extra space between characters, in points (Word "Character Spacing", CSS letter-spacing).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub spacing_pt: f32,
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
 }
 
 impl CharStyle {
@@ -241,6 +268,8 @@ impl Default for CharStyle {
             highlight_to: None,
             script: 0,
             link: 0,
+            caps: 0,
+            spacing_pt: 0.0,
         }
     }
 }
@@ -490,6 +519,10 @@ pub struct CellBorders {
 }
 
 impl CellBorders {
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none() && self.bottom.is_none() && self.left.is_none() && self.right.is_none()
+    }
+
     pub fn all(spec: BorderSpec) -> Self {
         Self {
             top: Some(spec),
@@ -598,6 +631,115 @@ pub fn parse_cell_coord(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Parses a numeric value from a table cell's text along with its decimal precision and significant figures.
+/// Index of the `)` matching the `(` at byte `open`.
+fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices().skip_while(|(i, _)| *i < open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Table cells as seen by a formula in `target`.
+struct TableCells<'a> {
+    doc: &'a Document,
+    table_id: u32,
+    tbl: &'a DocTable,
+    target: (usize, usize),
+}
+
+impl TableCells<'_> {
+    fn is_formula(&self, r: usize, c: usize) -> bool {
+        self.tbl
+            .rows
+            .get(r)
+            .and_then(|row| row.cells.get(c))
+            .is_some_and(|cell| cell.formula.is_some())
+    }
+}
+
+impl crate::table_math::CellSource for TableCells<'_> {
+    fn number(&self, r: usize, c: usize) -> Option<ParsedCellNumber> {
+        if (r, c) == self.target {
+            return None; // a cell never reads itself
+        }
+        parse_cell_number(&self.doc.cell_text(self.table_id, r, c))
+    }
+
+    fn aggregate(&self, call: &str) -> Option<ParsedCellNumber> {
+        let out = self.doc.eval_single_formula(
+            self.table_id,
+            self.tbl,
+            self.target.0,
+            self.target.1,
+            call,
+        )?;
+        parse_cell_number(&out)
+    }
+
+    fn arg_cells(&self, args: &str) -> Vec<(usize, usize)> {
+        let (tr, tc) = self.target;
+        let mut out = Vec::new();
+        for tok in args.split([',', ';']) {
+            let tok = tok.trim().to_ascii_uppercase();
+            match tok.as_str() {
+                "ABOVE" => out.extend(
+                    (0..tr)
+                        .filter(|&r| !self.is_formula(r, tc))
+                        .map(|r| (r, tc)),
+                ),
+                "LEFT" => out.extend(
+                    (0..tc)
+                        .filter(|&c| !self.is_formula(tr, c))
+                        .map(|c| (tr, c)),
+                ),
+                "BELOW" => out.extend(
+                    (tr + 1..self.tbl.rows.len())
+                        .filter(|&r| !self.is_formula(r, tc))
+                        .map(|r| (r, tc)),
+                ),
+                "RIGHT" => {
+                    let n = self.tbl.rows.get(tr).map_or(0, |r| r.cells.len());
+                    out.extend(
+                        (tc + 1..n)
+                            .filter(|&c| !self.is_formula(tr, c))
+                            .map(|c| (tr, c)),
+                    );
+                }
+                t => {
+                    if let Some((a, b)) = t.split_once(':') {
+                        if let (Some((r0, c0)), Some((r1, c1))) =
+                            (parse_cell_coord(a), parse_cell_coord(b))
+                        {
+                            for r in r0.min(r1)..=r0.max(r1) {
+                                for c in c0.min(c1)..=c0.max(c1) {
+                                    if (r, c) != self.target {
+                                        out.push((r, c));
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(rc) = parse_cell_coord(t) {
+                        if rc != self.target {
+                            out.push(rc);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 pub fn parse_cell_number(text: &str) -> Option<ParsedCellNumber> {
     let mut s = text.trim();
     if s.is_empty() || s.starts_with('=') {
@@ -760,6 +902,241 @@ pub struct DocTable {
     pub indent_in: f32,
 }
 
+/// Alignment of the text that follows a tab character.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum TabKind {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Decimal,
+}
+
+/// A custom tab stop, measured from the left edge of the text column (page margin or cell padding).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct TabStop {
+    pub pos_in: f32,
+    #[serde(default)]
+    pub kind: TabKind,
+    /// 0 = none, 1 = dots, 2 = dashes, 3 = solid line, 4 = middle dots
+    #[serde(default)]
+    pub leader: u8,
+}
+
+pub const MAX_TABS: usize = 16;
+
+/// A small, `Copy` set of tab stops sorted by position (paragraph formats are copied freely).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct TabStops {
+    n: u8,
+    stops: [TabStop; MAX_TABS],
+}
+
+impl TabStops {
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+    pub fn as_slice(&self) -> &[TabStop] {
+        &self.stops[..self.n as usize]
+    }
+    pub fn set(&mut self, t: TabStop) {
+        let mut v: Vec<TabStop> = self
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|s| (s.pos_in - t.pos_in).abs() > 0.005)
+            .collect();
+        v.push(t);
+        v.sort_by(|a, b| a.pos_in.total_cmp(&b.pos_in));
+        *self = Self::from_slice(&v);
+    }
+    /// Removes any stop at `pos_in` (Word's `w:tab w:val="clear"`).
+    pub fn remove_at(&mut self, pos_in: f32) {
+        let v: Vec<TabStop> = self
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|s| (s.pos_in - pos_in).abs() > 0.005)
+            .collect();
+        *self = Self::from_slice(&v);
+    }
+    pub fn from_slice(v: &[TabStop]) -> Self {
+        let mut out = Self::default();
+        for t in v.iter().take(MAX_TABS) {
+            out.stops[out.n as usize] = *t;
+            out.n += 1;
+        }
+        out
+    }
+}
+
+impl Serialize for TabStops {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for TabStops {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v: Vec<TabStop> = Vec::deserialize(d)?;
+        Ok(Self::from_slice(&v))
+    }
+}
+
+/// Number style of one list level (Word `w:numFmt`, RTF `\levelnfc`, CSS `list-style-type`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum NumFmt {
+    #[default]
+    Bullet,
+    Decimal,
+    DecimalZero,
+    LowerLetter,
+    UpperLetter,
+    LowerRoman,
+    UpperRoman,
+    /// Level shows only its literal text (no counter).
+    None,
+}
+
+impl NumFmt {
+    pub fn format(self, n: usize) -> String {
+        match self {
+            NumFmt::Bullet | NumFmt::None => String::new(),
+            NumFmt::Decimal => n.to_string(),
+            NumFmt::DecimalZero => format!("{n:02}"),
+            NumFmt::LowerLetter => to_alpha(n),
+            NumFmt::UpperLetter => to_alpha(n).to_uppercase(),
+            NumFmt::LowerRoman => to_roman(n),
+            NumFmt::UpperRoman => to_roman(n).to_uppercase(),
+        }
+    }
+}
+
+/// One level of an imported multi-level list.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ListLevel {
+    pub fmt: NumFmt,
+    /// Label template: "%1." / "%1.%2)" for numbers, or the bullet glyph itself.
+    pub text: String,
+    #[serde(default = "one_u32")]
+    pub start: u32,
+    /// Font for the marker (e.g. Symbol / Wingdings bullets mapped to Unicode keep a real font here).
+    #[serde(default)]
+    pub font: Option<u16>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default)]
+    pub size: Option<f32>,
+    #[serde(default)]
+    pub bold: Option<bool>,
+    /// What follows the marker: 0 = tab, 1 = space, 2 = nothing.
+    #[serde(default)]
+    pub suffix: u8,
+    /// Marker alignment at its position: Left / Center / Right.
+    #[serde(default = "align_left")]
+    pub align: Align,
+    /// Default indents for paragraphs at this level (inches); first-line is usually negative (hanging).
+    #[serde(default)]
+    pub left_in: f32,
+    #[serde(default)]
+    pub first_in: f32,
+}
+
+fn one_u32() -> u32 {
+    1
+}
+
+fn align_left() -> Align {
+    Align::Left
+}
+
+impl Default for ListLevel {
+    fn default() -> Self {
+        Self {
+            fmt: NumFmt::Bullet,
+            text: "•".into(),
+            start: 1,
+            font: None,
+            color: None,
+            size: None,
+            bold: None,
+            suffix: 0,
+            align: Align::Left,
+            left_in: 0.5,
+            first_in: -0.25,
+        }
+    }
+}
+
+/// A multi-level list definition referenced by `ParaFmt::list_id`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct ListDef {
+    pub id: u16,
+    pub levels: Vec<ListLevel>,
+}
+
+/// Converts Symbol / Wingdings private-use bullet code points to the Unicode glyph they show.
+pub fn map_symbol_bullet(text: &str, font_name: &str) -> (String, bool) {
+    let fl = font_name.to_ascii_lowercase();
+    let symbolic = fl.contains("symbol") || fl.contains("wingdings") || fl.contains("webdings");
+    let mut out = String::new();
+    let mut mapped = false;
+    for ch in text.chars() {
+        let code = ch as u32;
+        let low = if (0xF000..=0xF0FF).contains(&code) {
+            code - 0xF000
+        } else {
+            code
+        };
+        let m = if symbolic || (0xF000..=0xF0FF).contains(&code) {
+            if fl.contains("wingdings") {
+                match low {
+                    0x6C => Some('●'),
+                    0x6E => Some('■'),
+                    0x6F => Some('□'),
+                    0x71 => Some('❑'),
+                    0x75 => Some('◆'),
+                    0x76 => Some('❖'),
+                    0xA7 => Some('▪'),
+                    0xA8 => Some('◻'),
+                    0x9F => Some('•'),
+                    0xD8 => Some('➢'),
+                    0xE0 | 0xE8 => Some('➔'),
+                    0xFC => Some('✓'),
+                    0xFE => Some('☑'),
+                    0xA1 => Some('○'),
+                    0x77 => Some('⬥'),
+                    _ => None,
+                }
+            } else {
+                match low {
+                    0xB7 => Some('•'),
+                    0xA7 => Some('▪'),
+                    0x6F => Some('o'),
+                    0x2D => Some('–'),
+                    0xD8 => Some('➢'),
+                    0xA8 => Some('◻'),
+                    0xFC => Some('✓'),
+                    _ if (0x20..0x7F).contains(&low) && !symbolic => char::from_u32(low),
+                    _ => None,
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(c) = m {
+            out.push(c);
+            mapped = true;
+        } else if (0xF000..=0xF0FF).contains(&code) {
+            out.push('•');
+            mapped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    (out, mapped)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ParaFmt {
     pub align: Align,
@@ -792,6 +1169,30 @@ pub struct ParaFmt {
     pub table_row: u16,
     #[serde(default)]
     pub table_col: u16,
+    /// Extra left indent in inches, added to `indent` levels (imported documents use exact values).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub left_in: f32,
+    /// Right indent in inches.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub right_in: f32,
+    /// First-line offset in inches relative to the left indent (negative = hanging indent).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub first_in: f32,
+    /// When > 0, every line is exactly this tall (points), overriding `line_spacing`.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub line_exact_pt: f32,
+    /// When > 0, lines are at least this tall (points).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub line_min_pt: f32,
+    #[serde(default, skip_serializing_if = "TabStops::is_empty")]
+    pub tabs: TabStops,
+    /// 0 = built-in list look; >= 1 = `ListDef::id` in `Document::list_defs`.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub list_id: u16,
+    /// Paragraph borders (top/bottom/left/right) drawn around the text block; consecutive
+    /// paragraphs with identical borders share one box, like Word.
+    #[serde(default, skip_serializing_if = "CellBorders::is_empty")]
+    pub pborders: CellBorders,
 }
 
 impl Default for ParaFmt {
@@ -815,6 +1216,14 @@ impl Default for ParaFmt {
             table_id: 0,
             table_row: 0,
             table_col: 0,
+            left_in: 0.0,
+            right_in: 0.0,
+            first_in: 0.0,
+            line_exact_pt: 0.0,
+            line_min_pt: 0.0,
+            tabs: TabStops::default(),
+            list_id: 0,
+            pborders: CellBorders::default(),
         }
     }
 }
@@ -1193,6 +1602,13 @@ pub struct Document {
     pub footer_align: Align,
     pub header_italic: bool,
     pub footer_italic: bool,
+    /// Character style of the header / footer text (None = the editor's small grey default).
+    pub header_style: Option<CharStyle>,
+    pub footer_style: Option<CharStyle>,
+    /// Distance of the header from the top edge / footer from the bottom edge, in inches
+    /// (0 = centred in the margin, the editor's original placement).
+    pub header_dist_in: f32,
+    pub footer_dist_in: f32,
     pub page_footers: Vec<PageFooter>,
     pub info: DocInfo,
     pub links: Vec<String>,
@@ -1204,6 +1620,10 @@ pub struct Document {
     pub citations: Vec<CitationEntry>,
     pub images: Vec<DocImage>,
     pub tables: Vec<DocTable>,
+    /// Multi-level list definitions imported from Word / RTF / Google Docs.
+    pub list_defs: Vec<ListDef>,
+    /// Distance between default tab stops, in inches.
+    pub default_tab_in: f32,
 }
 
 impl Default for Document {
@@ -1217,6 +1637,10 @@ impl Default for Document {
             footer_align: Align::Center,
             header_italic: false,
             footer_italic: false,
+            header_style: None,
+            footer_style: None,
+            header_dist_in: 0.0,
+            footer_dist_in: 0.0,
             page_footers: Vec::new(),
             info: DocInfo::default(),
             links: Vec::new(),
@@ -1228,6 +1652,8 @@ impl Default for Document {
             citations: Vec::new(),
             images: Vec::new(),
             tables: Vec::new(),
+            list_defs: Vec::new(),
+            default_tab_in: 0.5,
         }
     }
 }
@@ -1265,8 +1691,10 @@ fn to_roman(mut n: usize) -> String {
 }
 
 fn to_alpha(n: usize) -> String {
+    // Word / CSS style: a..z, then aa..zz, aaa..
     let idx = n.saturating_sub(1) % 26;
-    ((b'a' + idx as u8) as char).to_string()
+    let reps = n.saturating_sub(1) / 26 + 1;
+    std::iter::repeat_n((b'a' + idx as u8) as char, reps.min(8)).collect()
 }
 
 impl Document {
@@ -1924,6 +2352,7 @@ impl Document {
                         || up.starts_with("AVERAGE(")
                         || up.starts_with("AVG(")
                         || up.starts_with("MEDIAN(")
+                        || crate::table_math::looks_like_expression(trimmed)
                     {
                         promoted.push((r_idx, c_idx, format!("={}", rest.trim())));
                     }
@@ -1988,7 +2417,33 @@ impl Document {
         target_col: usize,
         formula: &str,
     ) -> Option<String> {
-        let s = formula.trim().strip_prefix('=').unwrap_or(formula.trim()).trim();
+        let s = formula
+            .trim()
+            .strip_prefix('=')
+            .unwrap_or(formula.trim())
+            .trim();
+        // A lone aggregate call keeps its original semantics and formatting; anything else
+        // (cell arithmetic, constants, nested functions) goes through the expression engine.
+        let single_aggregate = s.find('(').is_some_and(|open| {
+            let name = s[..open].trim().to_ascii_uppercase();
+            matches!(
+                name.as_str(),
+                "SUM" | "TOTAL" | "SUBTOTAL" | "AVERAGE" | "AVG" | "MEDIAN"
+            ) && matching_paren(s, open) == Some(s.len() - 1)
+        });
+        if !single_aggregate {
+            let src = TableCells {
+                doc: self,
+                table_id,
+                tbl,
+                target: (target_row, target_col),
+            };
+            return match crate::table_math::evaluate(s, &src) {
+                Ok((v, inputs)) => Some(crate::table_math::format_result(v, &inputs)),
+                Err(crate::table_math::MathError::DivByZero) => Some("#DIV/0!".into()),
+                Err(crate::table_math::MathError::Syntax) => None,
+            };
+        }
         let open_paren = s.find('(')?;
         let close_paren = s.rfind(')')?;
         if close_paren < open_paren {
@@ -2469,6 +2924,97 @@ impl Document {
     }
 
     /// Number for a numbered list paragraph.
+    pub fn list_def(&self, id: u16) -> Option<&ListDef> {
+        if id == 0 {
+            return None;
+        }
+        self.list_defs.iter().find(|d| d.id == id)
+    }
+
+    /// The list level definition used by paragraph `fmt` (imported multi-level lists only).
+    pub fn list_level(&self, fmt: &ParaFmt) -> Option<&ListLevel> {
+        if fmt.list == ListKind::None {
+            return None;
+        }
+        let def = self.list_def(fmt.list_id)?;
+        def.levels
+            .get(fmt.indent as usize)
+            .or_else(|| def.levels.last())
+    }
+
+    /// Effective `(left, first_line_offset)` indents in inches: explicit paragraph indents, else the
+    /// list level's indents, else indent levels plus the built-in list hang.
+    pub fn indents_in(&self, fmt: &ParaFmt) -> (f32, f32) {
+        let explicit = fmt.left_in != 0.0 || fmt.first_in != 0.0;
+        if fmt.list != ListKind::None && fmt.list_id > 0 {
+            if explicit {
+                return (fmt.left_in, fmt.first_in);
+            }
+            if let Some(lv) = self.list_level(fmt) {
+                return (lv.left_in, lv.first_in);
+            }
+        }
+        let lvl = fmt.indent as f32 * crate::layout::INDENT_STEP;
+        if fmt.list != ListKind::None && !explicit {
+            (lvl + crate::layout::LIST_HANG, -crate::layout::LIST_HANG)
+        } else {
+            (lvl + fmt.left_in, fmt.first_in)
+        }
+    }
+
+    /// Left edge of the paragraph's text block (the minimum of the first and following lines).
+    pub fn block_left_in(&self, fmt: &ParaFmt) -> f32 {
+        let (l, f) = self.indents_in(fmt);
+        l + f.min(0.0)
+    }
+
+    /// Label for a paragraph in an imported multi-level list (Word "%1.%2." templates).
+    fn def_list_label(&self, p: usize, def: &ListDef) -> String {
+        let fmt = self.paras[p].fmt;
+        let lvl = (fmt.indent as usize).min(8);
+        let start_of = |l: usize| def.levels.get(l).map_or(1, |lv| lv.start as usize);
+        let mut counters = [0usize; 9];
+        let mut started = [false; 9];
+        for q in &self.paras[..=p] {
+            let f = q.fmt;
+            if f.list_id != fmt.list_id || f.list == ListKind::None {
+                continue;
+            }
+            let l = (f.indent as usize).min(8);
+            if started[l] {
+                counters[l] += 1;
+            } else {
+                counters[l] = start_of(l);
+                started[l] = true;
+            }
+            for s in started.iter_mut().skip(l + 1) {
+                *s = false;
+            }
+        }
+        let Some(lv) = def.levels.get(lvl).or_else(|| def.levels.last()) else {
+            return "•".into();
+        };
+        if lv.fmt == NumFmt::Bullet {
+            return lv.text.clone();
+        }
+        let mut out = String::new();
+        let mut chars = lv.text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                if let Some(d) = chars.peek().and_then(|d| d.to_digit(10)) {
+                    chars.next();
+                    let k = (d as usize).saturating_sub(1).min(8);
+                    let n = if started[k] { counters[k] } else { start_of(k) };
+                    let f = def.levels.get(k).map_or(NumFmt::Decimal, |l| l.fmt);
+                    out.push_str(&f.format(n));
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        out
+    }
+
     pub fn list_number(&self, p: usize) -> usize {
         let fmt = self.paras[p].fmt;
         let mut n = 1;
@@ -2490,6 +3036,11 @@ impl Document {
     /// Marker string for any list kind, supporting Google Docs bullet & numbering presets.
     pub fn list_marker(&self, p: usize) -> String {
         let fmt = self.paras[p].fmt;
+        if matches!(fmt.list, ListKind::Bullet | ListKind::Number) {
+            if let Some(def) = self.list_def(fmt.list_id) {
+                return self.def_list_label(p, def);
+            }
+        }
         let lvl = (fmt.indent as usize) % 3;
         match fmt.list {
             ListKind::None => String::new(),
@@ -2665,7 +3216,7 @@ struct FilePara {
 }
 
 /// Updates `"Page N"` or `"Page N of M"` patterns inside a footer string when page count changes.
-fn update_footer_page_nums(s: &str, page_1: usize, total_pages: usize) -> String {
+pub fn update_footer_page_nums(s: &str, page_1: usize, total_pages: usize) -> String {
     let lower = s.to_ascii_lowercase();
     let Some(idx) = lower.find("page ") else {
         return s.to_string();
@@ -2703,6 +3254,10 @@ fn update_footer_page_nums(s: &str, page_1: usize, total_pages: usize) -> String
     format!("{}{}{}", &s[..d1_start], page_1, &s[d1_end..])
 }
 
+fn default_tab_in() -> f32 {
+    0.5
+}
+
 fn default_hf_align() -> Align {
     Align::Center
 }
@@ -2724,6 +3279,14 @@ struct FileDoc {
     header_italic: bool,
     #[serde(default)]
     footer_italic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    header_style: Option<CharStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    footer_style: Option<CharStyle>,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    header_dist_in: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    footer_dist_in: f32,
     #[serde(default)]
     page_footers: Vec<PageFooter>,
     #[serde(default)]
@@ -2746,6 +3309,10 @@ struct FileDoc {
     images: Vec<DocImage>,
     #[serde(default)]
     tables: Vec<DocTable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    list_defs: Vec<ListDef>,
+    #[serde(default = "default_tab_in")]
+    default_tab_in: f32,
     paras: Vec<FilePara>,
 }
 
@@ -2762,6 +3329,10 @@ pub fn to_json(doc: &Document) -> String {
         footer_align: doc.footer_align,
         header_italic: doc.header_italic,
         footer_italic: doc.footer_italic,
+        header_style: doc.header_style,
+        footer_style: doc.footer_style,
+        header_dist_in: doc.header_dist_in,
+        footer_dist_in: doc.footer_dist_in,
         page_footers: doc.page_footers.clone(),
         info: doc.info.clone(),
         links: doc.links.clone(),
@@ -2773,6 +3344,8 @@ pub fn to_json(doc: &Document) -> String {
         citations: doc.citations.clone(),
         images: doc.images.clone(),
         tables: doc.tables.clone(),
+        list_defs: doc.list_defs.clone(),
+        default_tab_in: doc.default_tab_in,
         paras: doc
             .paras
             .iter()
@@ -2811,6 +3384,10 @@ pub fn from_json(s: &str) -> Result<Document, String> {
         footer_align: fd.footer_align,
         header_italic: fd.header_italic,
         footer_italic: fd.footer_italic,
+        header_style: fd.header_style,
+        footer_style: fd.footer_style,
+        header_dist_in: fd.header_dist_in,
+        footer_dist_in: fd.footer_dist_in,
         page_footers: fd.page_footers,
         info: fd.info,
         links: fd.links,
@@ -2822,7 +3399,44 @@ pub fn from_json(s: &str) -> Result<Document, String> {
         citations: fd.citations,
         images: fd.images,
         tables: fd.tables,
+        list_defs: fd.list_defs,
+        default_tab_in: if fd.default_tab_in > 0.05 {
+            fd.default_tab_in
+        } else {
+            0.5
+        },
     })
+}
+
+/// Decodes a text file: UTF-8 (with or without BOM), UTF-16 LE / BE with BOM, or Windows-1252.
+pub fn decode_text(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    let utf16 = |le: bool, b: &[u8]| {
+        let units: Vec<u16> = b
+            .chunks_exact(2)
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(true, rest);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return utf16(false, rest);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        // not UTF-8: older Windows text files are Windows-1252
+        Err(_) => bytes.iter().map(|&b| crate::rtf::cp1252_char(b)).collect(),
+    }
 }
 
 pub fn from_plain(s: &str) -> Document {
@@ -2905,7 +3519,10 @@ pub fn to_gdoc(doc: &Document) -> String {
             }));
         }
         for (a, b, s) in p.runs() {
-            let mut txt: String = p.text[a..b].iter().collect();
+            let mut txt: String = p.text[a..b]
+                .iter()
+                .map(|&c| if c == '\n' { '\u{000B}' } else { c })
+                .collect();
             if b == p.text.len() {
                 txt.push('\n');
             }
@@ -2922,6 +3539,7 @@ pub fn to_gdoc(doc: &Document) -> String {
                 "italic": s.italic,
                 "underline": s.underline,
                 "strikethrough": s.strike,
+                "smallCaps": s.caps == 2,
                 "baselineOffset": baseline,
                 "fontSize": { "magnitude": s.size, "unit": "PT" },
                 "weightedFontFamily": { "fontFamily": font_name },
@@ -3011,15 +3629,48 @@ pub fn to_gdoc(doc: &Document) -> String {
                 }
             }));
         }
+        let (ind_left, ind_first) = doc.indents_in(&p.fmt);
         let mut pstyle = serde_json::json!({
             "namedStyleType": named_style,
             "alignment": alignment,
             "lineSpacing": p.fmt.line_spacing * 100.0,
             "spaceAbove": { "magnitude": p.fmt.space_before, "unit": "PT" },
             "spaceBelow": { "magnitude": p.fmt.space_after, "unit": "PT" },
-            "indentStart": { "magnitude": p.fmt.indent as f32 * 36.0, "unit": "PT" },
+            "indentStart": { "magnitude": ind_left * 72.0, "unit": "PT" },
+            "indentFirstLine": { "magnitude": (ind_left + ind_first) * 72.0, "unit": "PT" },
+            "indentEnd": { "magnitude": p.fmt.right_in * 72.0, "unit": "PT" },
             "pageBreakBefore": p.fmt.page_break_before
         });
+        if !p.fmt.tabs.is_empty() {
+            pstyle["tabStops"] = serde_json::Value::Array(
+                p.fmt
+                    .tabs
+                    .as_slice()
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "offset": { "magnitude": t.pos_in * 72.0, "unit": "PT" },
+                            "alignment": match t.kind { TabKind::Center => "CENTER", TabKind::Right | TabKind::Decimal => "END", TabKind::Left => "START" }
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        for (key, b) in [
+            ("borderTop", p.fmt.pborders.top),
+            ("borderBottom", p.fmt.pborders.bottom),
+            ("borderLeft", p.fmt.pborders.left),
+            ("borderRight", p.fmt.pborders.right),
+        ] {
+            if let Some(b) = b {
+                pstyle[key] = serde_json::json!({
+                    "width": { "magnitude": b.width_pt, "unit": "PT" },
+                    "padding": { "magnitude": 4.0, "unit": "PT" },
+                    "dashStyle": "SOLID",
+                    "color": { "color": { "rgbColor": { "red": b.color[0] as f32 / 255.0, "green": b.color[1] as f32 / 255.0, "blue": b.color[2] as f32 / 255.0 } } }
+                });
+            }
+        }
         if let Some(shd) = p.fmt.shading {
             pstyle["shading"] = serde_json::json!({
                 "backgroundColor": {
@@ -3087,7 +3738,13 @@ pub fn to_gdoc(doc: &Document) -> String {
         "headerAlign": doc.header_align,
         "footerAlign": doc.footer_align,
         "headerItalic": doc.header_italic,
-        "footerItalic": doc.footer_italic
+        "footerItalic": doc.footer_italic,
+        "headerStyle": doc.header_style,
+        "footerStyle": doc.footer_style,
+        "headerDist": doc.header_dist_in,
+        "footerDist": doc.footer_dist_in,
+        "marginHeader": { "magnitude": if doc.header_dist_in > 0.0 { doc.header_dist_in * 72.0 } else { 36.0 }, "unit": "PT" },
+        "marginFooter": { "magnitude": if doc.footer_dist_in > 0.0 { doc.footer_dist_in * 72.0 } else { 36.0 }, "unit": "PT" }
     });
 
     let mut val: serde_json::Value = serde_json::from_str(&to_json(doc)).unwrap_or_else(|_| serde_json::json!({}));
@@ -3106,278 +3763,18 @@ pub fn from_gdoc(s: &str) -> Result<Document, String> {
     if v.get("paras").and_then(|p| p.as_array()).is_some() {
         return from_json(s);
     }
-    // 2. Google Docs REST API v1 JSON structure (`body.content`)
-    if let Some(content) = v.get("body").and_then(|b| b.get("content")).and_then(|c| c.as_array()) {
-        let mut doc = Document { paras: Vec::new(), ..Default::default() };
-        if let Some(t) = v.get("title").and_then(|t| t.as_str()) {
-            doc.info.title = t.to_string();
-        }
-        let parse_rgb = |c_obj: &serde_json::Value| -> Option<[u8; 3]> {
-            let rgb = c_obj.get("color")?.get("rgbColor")?;
-            let r = (rgb.get("red").and_then(|x| x.as_f64()).unwrap_or(0.0) * 255.0).round() as u8;
-            let g = (rgb.get("green").and_then(|x| x.as_f64()).unwrap_or(0.0) * 255.0).round() as u8;
-            let b = (rgb.get("blue").and_then(|x| x.as_f64()).unwrap_or(0.0) * 255.0).round() as u8;
-            Some([r, g, b])
-        };
-        if let Some(ds) = v.get("documentStyle") {
-            let pt_to_in = |obj: &serde_json::Value, key: &str| -> Option<f32> {
-                obj.get(key)?.get("magnitude")?.as_f64().map(|m| (m as f32) / 72.0)
-            };
-            if let Some(ps) = ds.get("pageSize") {
-                if let Some(w) = pt_to_in(ps, "width") {
-                    doc.page.width = w;
-                }
-                if let Some(h) = pt_to_in(ps, "height") {
-                    doc.page.height = h;
-                }
-            }
-            if let Some(mt) = pt_to_in(ds, "marginTop") {
-                doc.page.margin_top = mt;
-            }
-            if let Some(mb) = pt_to_in(ds, "marginBottom") {
-                doc.page.margin_bottom = mb;
-            }
-            if let Some(ml) = pt_to_in(ds, "marginLeft") {
-                doc.page.margin_left = ml;
-            }
-            if let Some(mr) = pt_to_in(ds, "marginRight") {
-                doc.page.margin_right = mr;
-            }
-            if let Some(bg) = ds.get("background").and_then(parse_rgb) {
-                doc.page.background = bg;
-            }
-            if let Some(pn) = ds.get("pageNumbers").and_then(|x| x.as_bool()) {
-                doc.page.page_numbers = pn;
-            }
-            if let Some(pl) = ds.get("pageless").and_then(|x| x.as_bool()) {
-                doc.pageless = pl;
-            }
-            if let Some(ht) = ds.get("headerText").and_then(|x| x.as_str()) {
-                doc.header = ht.to_string();
-            }
-            if let Some(ft) = ds.get("footerText").and_then(|x| x.as_str()) {
-                doc.footer = ft.to_string();
-            }
-            if let Some(ha) = ds.get("headerAlign").and_then(|x| serde_json::from_value(x.clone()).ok()) {
-                doc.header_align = ha;
-            }
-            if let Some(fa) = ds.get("footerAlign").and_then(|x| serde_json::from_value(x.clone()).ok()) {
-                doc.footer_align = fa;
-            }
-            if let Some(hi) = ds.get("headerItalic").and_then(|x| x.as_bool()) {
-                doc.header_italic = hi;
-            }
-            if let Some(fi) = ds.get("footerItalic").and_then(|x| x.as_bool()) {
-                doc.footer_italic = fi;
-            }
-        }
-        if let Some(tbls) = v.get("tables").and_then(|x| serde_json::from_value::<Vec<DocTable>>(x.clone()).ok()) {
-            doc.tables = tbls;
-        }
-        if let Some(iobjs) = v.get("inlineObjects").and_then(|x| x.as_object()) {
-            for (oid, obj) in iobjs {
-                let id_num = oid
-                    .strip_prefix("kix.img_")
-                    .and_then(|n| n.parse::<u64>().ok())
-                    .unwrap_or(doc.images.len() as u64 + 1);
-                if let Some(emb) = obj.get("inlineObjectProperties").and_then(|p| p.get("embeddedObject")) {
-                    let name = emb.get("title").and_then(|x| x.as_str()).unwrap_or("Image").to_string();
-                    let caption = emb.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let w_in = emb
-                        .get("size")
-                        .and_then(|s| s.get("width"))
-                        .and_then(|w| w.get("magnitude"))
-                        .and_then(|m| m.as_f64())
-                        .map_or(3.0, |m| (m as f32) / 72.0);
-                    let h_in = emb
-                        .get("size")
-                        .and_then(|s| s.get("height"))
-                        .and_then(|h| h.get("magnitude"))
-                        .and_then(|m| m.as_f64())
-                        .map_or(2.0, |m| (m as f32) / 72.0);
-                    let nw = emb.get("naturalSize").and_then(|s| s.get("width")).and_then(|x| x.as_u64()).unwrap_or(100) as u32;
-                    let nh = emb.get("naturalSize").and_then(|s| s.get("height")).and_then(|x| x.as_u64()).unwrap_or(100) as u32;
-                    let uri = emb
-                        .get("imageProperties")
-                        .and_then(|p| p.get("contentUri"))
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("");
-                    let b64 = uri.strip_prefix("data:image/png;base64,").unwrap_or(uri).to_string();
-                    if !b64.is_empty() {
-                        doc.images.push(DocImage {
-                            id: id_num,
-                            name,
-                            natural_size: [nw.max(1), nh.max(1)],
-                            width_in: w_in,
-                            height_in: h_in,
-                            caption,
-                            png_b64: b64,
-                            seamless: false,
-                        });
-                    }
-                }
-            }
-        }
-        let styles = named_styles();
-        for item in content {
-            let Some(p_obj) = item.get("paragraph") else { continue };
-            let mut fmt = ParaFmt::default();
-            let mut base = CharStyle::default();
-            if let Some(ps) = p_obj.get("paragraphStyle") {
-                if let Some(nst) = ps.get("namedStyleType").and_then(|x| x.as_str()) {
-                    let style_idx = match nst {
-                        "BODY_SINGLE" => Some(1),
-                        "TITLE" => Some(2),
-                        "SUBTITLE" => Some(3),
-                        "HEADING_1" => Some(4),
-                        "HEADING_2" => Some(5),
-                        "HEADING_3" | "HEADING_4" | "HEADING_5" | "HEADING_6" => Some(6),
-                        "QUOTE" => Some(7),
-                        "BULLET_1" => Some(8),
-                        "NUMBER_LIST" => Some(9),
-                        "CODE" => Some(10),
-                        _ => None,
-                    };
-                    if let Some(idx) = style_idx {
-                        fmt = ParaFmt { style: idx, ..styles[idx].fmt };
-                        base = styles[idx].chr;
-                    }
-                }
-                if let Some(al) = ps.get("alignment").and_then(|x| x.as_str()) {
-                    fmt.align = match al {
-                        "CENTER" => Align::Center,
-                        "END" | "RIGHT" => Align::Right,
-                        "JUSTIFIED" => Align::Justify,
-                        _ => Align::Left,
-                    };
-                }
-                if let Some(ls) = ps.get("lineSpacing").and_then(|x| x.as_f64()) {
-                    fmt.line_spacing = (ls as f32 / 100.0).clamp(1.0, 3.0);
-                }
-                if let Some(sa) = ps.get("spaceAbove").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
-                    fmt.space_before = (sa as f32).clamp(0.0, 72.0);
-                }
-                if let Some(sb) = ps.get("spaceBelow").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
-                    fmt.space_after = (sb as f32).clamp(0.0, 72.0);
-                }
-                if let Some(ind) = ps.get("indentStart").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
-                    fmt.indent = ((ind as f32 / 36.0).round() as i32).clamp(0, 8) as u8;
-                }
-                if let Some(pbb) = ps.get("pageBreakBefore").and_then(|x| x.as_bool()) {
-                    fmt.page_break_before = pbb;
-                }
-                if let Some(shd) = ps.get("shading").and_then(|s| s.get("backgroundColor")).and_then(parse_rgb) {
-                    fmt.shading = Some(shd);
-                }
-            }
-            if let Some(bul) = p_obj.get("bullet") {
-                let lid = bul.get("listId").and_then(|x| x.as_str()).unwrap_or("");
-                fmt.list = if lid.contains("number") || lid.contains("decimal") {
-                    ListKind::Number
-                } else if lid.contains("check") {
-                    ListKind::Checklist
-                } else {
-                    ListKind::Bullet
-                };
-                if let Some(nl) = bul.get("nestingLevel").and_then(|x| x.as_u64()) {
-                    fmt.indent = (nl as u8).min(8);
-                }
-                if let Some(chk) = bul.get("checked").and_then(|x| x.as_bool()) {
-                    fmt.checked = chk;
-                }
-                if let Some(bp) = bul.get("bulletPreset").and_then(|x| x.as_u64()) {
-                    fmt.bullet_preset = bp as u8;
-                }
-            }
-            if let Some(tcr) = p_obj.get("tableCellRef") {
-                fmt.table_id = tcr.get("tableId").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                fmt.table_row = tcr.get("row").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
-                fmt.table_col = tcr.get("col").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
-            }
-            let mut p = Para::new(base, fmt);
-            if let Some(elems) = p_obj.get("elements").and_then(|e| e.as_array()) {
-                for el in elems {
-                    if el.get("horizontalRule").is_some() {
-                        p.fmt.hr = true;
-                        continue;
-                    }
-                    if let Some(ioe) = el.get("inlineObjectElement") {
-                        if let Some(oid) = ioe.get("inlineObjectId").and_then(|x| x.as_str()) {
-                            if let Some(id_num) = oid.strip_prefix("kix.img_").and_then(|n| n.parse::<u64>().ok()) {
-                                p.fmt.image_id = id_num;
-                            }
-                        }
-                        continue;
-                    }
-                    let Some(tr) = el.get("textRun") else { continue };
-                    let raw = tr.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    let txt = raw.strip_suffix('\n').unwrap_or(raw);
-                    let mut st = base;
-                    if let Some(ts) = tr.get("textStyle") {
-                        if let Some(b) = ts.get("bold").and_then(|x| x.as_bool()) {
-                            st.bold = b;
-                        }
-                        if let Some(i) = ts.get("italic").and_then(|x| x.as_bool()) {
-                            st.italic = i;
-                        }
-                        if let Some(u) = ts.get("underline").and_then(|x| x.as_bool()) {
-                            st.underline = u;
-                        }
-                        if let Some(s) = ts.get("strikethrough").and_then(|x| x.as_bool()) {
-                            st.strike = s;
-                        }
-                        if let Some(bo) = ts.get("baselineOffset").and_then(|x| x.as_str()) {
-                            st.script = match bo {
-                                "SUPERSCRIPT" => 1,
-                                "SUBSCRIPT" => -1,
-                                _ => 0,
-                            };
-                        }
-                        if let Some(sz) = ts.get("fontSize").and_then(|x| x.get("magnitude")).and_then(|x| x.as_f64()) {
-                            st.size = (sz as f32).clamp(MIN_SIZE, MAX_SIZE);
-                        }
-                        if let Some(ff) = ts.get("weightedFontFamily").and_then(|x| x.get("fontFamily")).and_then(|x| x.as_str()) {
-                            st.font = font_index(ff);
-                        }
-                        if let Some(fg) = ts.get("foregroundColor").and_then(parse_rgb) {
-                            st.color = fg;
-                        }
-                        if let Some(fg2) = ts.get("foregroundColorTo").and_then(parse_rgb) {
-                            st.color_to = Some(fg2);
-                        }
-                        if let Some(bg) = ts.get("backgroundColor").and_then(parse_rgb) {
-                            st.highlight = Some(bg);
-                        }
-                        if let Some(bg2) = ts.get("backgroundColorTo").and_then(parse_rgb) {
-                            st.highlight_to = Some(bg2);
-                        }
-                        if let Some(url) = ts.get("link").and_then(|x| x.get("url")).and_then(|x| x.as_str()) {
-                            st.link = doc.add_link(url);
-                            st.underline = true;
-                            if st.color == [0, 0, 0] {
-                                st.color = [11, 87, 208];
-                            }
-                        }
-                    }
-                    for ch in txt.chars() {
-                        p.text.push(ch);
-                        p.styles.push(st);
-                    }
-                    p.end_style = st;
-                }
-            }
-            doc.paras.push(p);
-        }
-        if doc.paras.is_empty() {
-            doc.paras.push(Para::new(CharStyle::default(), ParaFmt::default()));
-        }
-        return Ok(doc);
+    // 2. Google Docs REST API v1 JSON structure (`body.content`, or document tabs)
+    if v.get("body").and_then(|b| b.get("content")).is_some() || v.get("tabs").is_some() {
+        return Ok(crate::gdoc::from_api(&v));
     }
     // 3. Google Drive for Desktop shortcut .gdoc ({"url": ..., "doc_id": ..., "email": ...})
     if v.get("url").is_some() || v.get("doc_id").is_some() {
         let mut doc = Document::default();
         let doc_id = v.get("doc_id").and_then(|x| x.as_str()).unwrap_or("");
-        let url = v.get("url").and_then(|x| x.as_str()).map_or_else(|| format!("https://docs.google.com/document/d/{doc_id}/edit"), |u| u.to_string());
+        let url = v.get("url").and_then(|x| x.as_str()).map_or_else(
+            || format!("https://docs.google.com/document/d/{doc_id}/edit"),
+            |u| u.to_string(),
+        );
         let email = v.get("email").and_then(|x| x.as_str()).unwrap_or("");
         doc.info.author = email.to_string();
         doc.info.notes = format!("Google Docs ID: {doc_id}\nURL: {url}");
@@ -3398,1120 +3795,25 @@ pub fn from_gdoc(s: &str) -> Result<Document, String> {
 // ───────────────────────── Markdown & HTML export / import ─────────────────────────
 
 pub fn to_markdown(doc: &Document) -> String {
-    let mut out = String::new();
-    let styles = named_styles();
-    let fmt_para_inline = |p: &Para| -> String {
-        let mut s_out = String::new();
-        for (a, b, s) in p.runs() {
-            let txt: String = p.text[a..b].iter().collect();
-            let mut seg = txt.replace('|', "\\|");
-            if s.bold && !styles.get(p.fmt.style).is_some_and(|ns| ns.chr.bold) {
-                seg = format!("**{seg}**");
-            }
-            if s.italic && !styles.get(p.fmt.style).is_some_and(|ns| ns.chr.italic) {
-                seg = format!("*{seg}*");
-            }
-            if s.strike {
-                seg = format!("~~{seg}~~");
-            }
-            if let Some(url) = doc.link_url(s.link) {
-                seg = format!("[{seg}]({url})");
-            }
-            s_out.push_str(&seg);
-        }
-        s_out
-    };
-    let mut pi = 0;
-    while pi < doc.paras.len() {
-        let p = &doc.paras[pi];
-        if p.fmt.table_id > 0 {
-            let tid = p.fmt.table_id;
-            let mut tbl_end = pi + 1;
-            while tbl_end < doc.paras.len() && doc.paras[tbl_end].fmt.table_id == tid {
-                tbl_end += 1;
-            }
-            let max_row = doc.paras[pi..tbl_end].iter().map(|x| x.fmt.table_row).max().unwrap_or(0) as usize;
-            let max_col = doc.table(tid).map_or_else(
-                || doc.paras[pi..tbl_end].iter().map(|x| x.fmt.table_col).max().unwrap_or(0) as usize,
-                |t| t.grid_cols_in.len().max(1) - 1,
-            );
-            let ncols = max_col + 1;
-            for r in 0..=max_row {
-                out.push('|');
-                for c in 0..ncols {
-                    let mut cell_parts = Vec::new();
-                    for cp in &doc.paras[pi..tbl_end] {
-                        if cp.fmt.table_row as usize == r && cp.fmt.table_col as usize == c {
-                            cell_parts.push(fmt_para_inline(cp));
-                        }
-                    }
-                    out.push(' ');
-                    out.push_str(&cell_parts.join("<br>"));
-                    out.push_str(" |");
-                }
-                out.push('\n');
-                if r == 0 {
-                    out.push('|');
-                    for _ in 0..ncols {
-                        out.push_str(" --- |");
-                    }
-                    out.push('\n');
-                }
-            }
-            out.push('\n');
-            pi = tbl_end;
-            continue;
-        }
-        if p.fmt.hr {
-            out.push_str("---\n\n");
-            pi += 1;
-            continue;
-        }
-        if p.fmt.image_id > 0 {
-            if let Some(img) = doc.image(p.fmt.image_id) {
-                let cap = if img.caption.trim().is_empty() { &img.name } else { img.caption.trim() };
-                out.push_str(&format!("![{cap}]({})\n\n", img.name));
-                pi += 1;
-                continue;
-            }
-        }
-        let sname = styles.get(p.fmt.style).map_or("Default Text", |s| s.name);
-        match sname {
-            "Title" => out.push_str("# "),
-            "Subtitle" => out.push_str("## "),
-            "Heading 1" => out.push_str("# "),
-            "Heading 2" => out.push_str("## "),
-            "Heading 3" => out.push_str("### "),
-            "Quote" => out.push_str("> "),
-            _ => {}
-        }
-        let indent = "  ".repeat(p.fmt.indent as usize);
-        match p.fmt.list {
-            ListKind::Bullet => out.push_str(&format!("{indent}- ")),
-            ListKind::Number => out.push_str(&format!("{indent}{}. ", doc.list_number(pi))),
-            ListKind::Checklist => out.push_str(&format!("{indent}- [{}] ", if p.fmt.checked { "x" } else { " " })),
-            ListKind::None => {}
-        }
-        for (a, b, s) in p.runs() {
-            let txt: String = p.text[a..b].iter().collect();
-            let mut seg = txt;
-            if s.bold && !styles.get(p.fmt.style).is_some_and(|ns| ns.chr.bold) {
-                seg = format!("**{seg}**");
-            }
-            if s.italic && !styles.get(p.fmt.style).is_some_and(|ns| ns.chr.italic) {
-                seg = format!("*{seg}*");
-            }
-            if s.strike {
-                seg = format!("~~{seg}~~");
-            }
-            if let Some(url) = doc.link_url(s.link) {
-                seg = format!("[{seg}]({url})");
-            }
-            out.push_str(&seg);
-        }
-        out.push('\n');
-        let next_is_list = doc.paras.get(pi + 1).is_some_and(|np| np.fmt.list != ListKind::None);
-        if p.fmt.list == ListKind::None || !next_is_list {
-            out.push('\n');
-        }
-        pi += 1;
-    }
-    out
+    crate::markdown::to_markdown(doc)
 }
 
 pub fn from_markdown(src: &str) -> Document {
-    let mut doc = Document { paras: Vec::new(), ..Default::default() };
-    let styles = named_styles();
-    let normalized = src.replace("\r\n", "\n");
-    let lines: Vec<&str> = normalized.lines().collect();
-    let mut li = 0usize;
-    while li < lines.len() {
-        let raw_line = lines[li];
-        let trimmed = raw_line.trim_end();
-        if trimmed.is_empty() {
-            // A single blank line after a paragraph in Markdown is the paragraph separator;
-            // consecutive blank lines represent intentional empty paragraphs.
-            let mut blanks = 0usize;
-            while li < lines.len() && lines[li].trim_end().is_empty() {
-                blanks += 1;
-                li += 1;
-            }
-            for _ in 1..blanks {
-                doc.paras.push(Para::new(CharStyle::default(), ParaFmt::default()));
-            }
-            continue;
-        }
-        // GFM pipe table (`| col1 | col2 |`)
-        if trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2 {
-            let mut tbl_lines = Vec::new();
-            while li < lines.len() {
-                let tl = lines[li].trim();
-                if tl.starts_with('|') && tl.ends_with('|') && tl.len() >= 2 {
-                    tbl_lines.push(tl);
-                    li += 1;
-                } else {
-                    break;
-                }
-            }
-            // Filter out separator row (`| --- | --- |`)
-            let data_rows: Vec<Vec<String>> = tbl_lines
-                .into_iter()
-                .filter(|row| {
-                    let inner = &row[1..row.len() - 1];
-                    !inner.split('|').all(|c| {
-                        let ct = c.trim();
-                        !ct.is_empty() && ct.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
-                    })
-                })
-                .map(|row| {
-                    let inner = &row[1..row.len() - 1];
-                    inner.split('|').map(|c| c.trim().replace("\\|", "|")).collect()
-                })
-                .collect();
-            if !data_rows.is_empty() {
-                let ncols = data_rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
-                let avail_w = (doc.page.width - doc.page.margin_left - doc.page.margin_right).max(2.0);
-                let col_w = avail_w / ncols as f32;
-                let tid = doc.next_table_id();
-                let mut rows_spec = Vec::with_capacity(data_rows.len());
-                for (r_idx, r_cells) in data_rows.iter().enumerate() {
-                    let mut cells_spec = Vec::with_capacity(ncols);
-                    for c_idx in 0..ncols {
-                        cells_spec.push(TableCellSpec {
-                            width_in: col_w,
-                            grid_span: 1,
-                            shading: None,
-                            borders: CellBorders::all(BorderSpec::default()),
-                            v_align: CellVAlign::Top,
-                            pad_left_in: 0.075,
-                            pad_right_in: 0.075,
-                            pad_top_in: 0.02,
-                            pad_bottom_in: 0.02,
-                            formula: None,
-                            wrap_text: true,
-                        });
-                        let raw_cell = r_cells.get(c_idx).map_or("", String::as_str);
-                        for part in raw_cell.split("<br>") {
-                            let fmt = ParaFmt {
-                                table_id: tid,
-                                table_row: r_idx as u16,
-                                table_col: c_idx as u16,
-                                ..ParaFmt::default()
-                            };
-                            let mut p = Para::new(CharStyle::default(), fmt);
-                            parse_md_inline(&mut doc, &mut p, part, CharStyle::default());
-                            doc.paras.push(p);
-                        }
-                    }
-                    rows_spec.push(TableRowSpec {
-                        cells: cells_spec,
-                        min_height_pt: 0.0,
-                        grid_after: 0,
-                    });
-                }
-                doc.tables.push(DocTable {
-                    id: tid,
-                    grid_cols_in: vec![col_w; ncols],
-                    rows: rows_spec,
-                    indent_in: 0.0,
-                });
-                if li < lines.len() && lines[li].trim().is_empty() {
-                    li += 1;
-                }
-                continue;
-            }
-        }
-        li += 1;
-        if trimmed == "---" || trimmed == "***" {
-            let mut p = Para::new(CharStyle::default(), ParaFmt::default());
-            p.fmt.hr = true;
-            doc.paras.push(p);
-            continue;
-        }
-        let mut fmt = ParaFmt::default();
-        let mut base = CharStyle::default();
-        let leading_spaces = trimmed.chars().take_while(|&c| c == ' ').count();
-        let list_indent = (leading_spaces / 2).min(8) as u8;
-        let unindented = &trimmed[leading_spaces..];
-        let mut text = trimmed;
-        if let Some(rest) = text.strip_prefix("### ") {
-            fmt = ParaFmt { style: 6, ..styles[6].fmt };
-            base = styles[6].chr;
-            text = rest;
-        } else if let Some(rest) = text.strip_prefix("## ") {
-            fmt = ParaFmt { style: 5, ..styles[5].fmt };
-            base = styles[5].chr;
-            text = rest;
-        } else if let Some(rest) = text.strip_prefix("# ") {
-            fmt = ParaFmt { style: 4, ..styles[4].fmt };
-            base = styles[4].chr;
-            text = rest;
-        } else if let Some(rest) = text.strip_prefix("> ") {
-            fmt = ParaFmt { style: 7, ..styles[7].fmt };
-            base = styles[7].chr;
-            text = rest;
-        } else if let Some(rest) = unindented.strip_prefix("- [x] ").or_else(|| unindented.strip_prefix("- [X] ")) {
-            fmt.list = ListKind::Checklist;
-            fmt.checked = true;
-            fmt.indent = list_indent;
-            text = rest;
-        } else if let Some(rest) = unindented.strip_prefix("- [ ] ").or_else(|| unindented.strip_prefix("[] ")) {
-            fmt.list = ListKind::Checklist;
-            fmt.checked = false;
-            fmt.indent = list_indent;
-            text = rest;
-        } else if let Some(rest) = unindented.strip_prefix("- ").or_else(|| unindented.strip_prefix("* ")) {
-            fmt.list = ListKind::Bullet;
-            fmt.indent = list_indent;
-            text = rest;
-        } else if let Some(dot) = unindented.find(". ") {
-            if dot > 0 && unindented[..dot].chars().all(|c| c.is_ascii_digit()) {
-                fmt.list = ListKind::Number;
-                fmt.indent = list_indent;
-                text = &unindented[dot + 2..];
-            }
-        }
-        let mut p = Para::new(base, fmt);
-        parse_md_inline(&mut doc, &mut p, text, base);
-        doc.paras.push(p);
-    }
-    if doc.paras.is_empty() {
-        doc.paras.push(Para::new(CharStyle::default(), ParaFmt::default()));
-    }
-    doc
-}
-
-fn parse_md_inline(doc: &mut Document, p: &mut Para, text: &str, base: CharStyle) {
-    let mut i = 0usize;
-    let bytes = text.as_bytes();
-    while i < bytes.len() {
-        // Link: [label](url)
-        if bytes[i] == b'[' {
-            if let Some(close_br) = text[i + 1..].find("](") {
-                let label_end = i + 1 + close_br;
-                let url_start = label_end + 2;
-                if let Some(close_par) = text[url_start..].find(')') {
-                    let url_end = url_start + close_par;
-                    let label = &text[i + 1..label_end];
-                    let url = &text[url_start..url_end];
-                    let lid = doc.add_link(url);
-                    let mut st = base;
-                    st.link = lid;
-                    st.underline = true;
-                    if st.color == [0, 0, 0] {
-                        st.color = [11, 87, 208];
-                    }
-                    parse_md_inline(doc, p, label, st);
-                    i = url_end + 1;
-                    continue;
-                }
-            }
-        }
-        // Bold+Italic: ***...***
-        if text[i..].starts_with("***") {
-            if let Some(end) = text[i + 3..].find("***") {
-                if end > 0 {
-                    let mut st = base;
-                    st.bold = true;
-                    st.italic = true;
-                    parse_md_inline(doc, p, &text[i + 3..i + 3 + end], st);
-                    i += 6 + end;
-                    continue;
-                }
-            }
-        }
-        // Bold: **...**
-        if text[i..].starts_with("**") {
-            if let Some(end) = text[i + 2..].find("**") {
-                if end > 0 {
-                    let mut st = base;
-                    st.bold = true;
-                    parse_md_inline(doc, p, &text[i + 2..i + 2 + end], st);
-                    i += 4 + end;
-                    continue;
-                }
-            }
-        }
-        // Strikethrough: ~~...~~
-        if text[i..].starts_with("~~") {
-            if let Some(end) = text[i + 2..].find("~~") {
-                if end > 0 {
-                    let mut st = base;
-                    st.strike = true;
-                    parse_md_inline(doc, p, &text[i + 2..i + 2 + end], st);
-                    i += 4 + end;
-                    continue;
-                }
-            }
-        }
-        // Italic: *...*
-        if bytes[i] == b'*' {
-            if let Some(end) = text[i + 1..].find('*') {
-                if end > 0 {
-                    let mut st = base;
-                    st.italic = true;
-                    parse_md_inline(doc, p, &text[i + 1..i + 1 + end], st);
-                    i += 2 + end;
-                    continue;
-                }
-            }
-        }
-        if let Some(ch) = text[i..].chars().next() {
-            p.text.push(ch);
-            p.styles.push(base);
-            p.end_style = base;
-            i += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
+    crate::markdown::from_markdown(src)
 }
 
 pub fn to_html(doc: &Document) -> String {
-    let mut out = String::from("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>");
-    out.push_str(if doc.info.title.is_empty() { "Document" } else { &doc.info.title });
-    out.push_str("</title><style>body{max-width:816px;margin:40px auto;padding:0 48px;font-family:Calibri,sans-serif;line-height:1.4;color:#1f1f1f;}</style></head><body>\n");
-    for p in &doc.paras {
-        if p.fmt.hr {
-            out.push_str("<hr>\n");
-            continue;
-        }
-        let align = match p.fmt.align {
-            Align::Left => "left",
-            Align::Center => "center",
-            Align::Right => "right",
-            Align::Justify => "justify",
-        };
-        if p.fmt.image_id > 0 {
-            if let Some(img) = doc.image(p.fmt.image_id) {
-                out.push_str(&format!(
-                    "<figure style=\"text-align:{align};margin:12px 0;\"><img src=\"data:image/png;base64,{}\" style=\"width:{:.2}in;height:{:.2}in;max-width:100%;\" alt=\"{}\">",
-                    img.png_b64,
-                    img.width_in,
-                    img.height_in,
-                    img.name
-                ));
-                if !img.caption.trim().is_empty() {
-                    out.push_str(&format!("<figcaption style=\"font-style:italic;color:#5a606c;font-size:10.5pt;margin-top:4px;\">{}</figcaption>", img.caption.trim()));
-                }
-                out.push_str("</figure>\n");
-                continue;
-            }
-        }
-        out.push_str(&format!("<p style=\"text-align:{align};\">"));
-        if p.fmt.list == ListKind::Checklist {
-            out.push_str(if p.fmt.checked { "☑ " } else { "☐ " });
-        } else if p.fmt.list == ListKind::Bullet {
-            out.push_str("• ");
-        }
-        for (a, b, s) in p.runs() {
-            let txt: String = p.text[a..b]
-                .iter()
-                .map(|c| match c {
-                    '&' => "&amp;".to_string(),
-                    '<' => "&lt;".to_string(),
-                    '>' => "&gt;".to_string(),
-                    _ => c.to_string(),
-                })
-                .collect();
-            let mut span = txt;
-            if s.bold {
-                span = format!("<b>{span}</b>");
-            }
-            if s.italic {
-                span = format!("<i>{span}</i>");
-            }
-            if s.underline {
-                span = format!("<u>{span}</u>");
-            }
-            if s.strike {
-                span = format!("<s>{span}</s>");
-            }
-            if let Some(c2) = s.color_to {
-                if c2 != s.color {
-                    let c1 = s.color;
-                    span = format!(
-                        "<span style=\"background:linear-gradient(90deg,rgb({},{},{}),rgb({},{},{}));-webkit-background-clip:text;-webkit-text-fill-color:transparent;\">{span}</span>",
-                        c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]
-                    );
-                }
-            }
-            if let (Some(c1), Some(c2)) = (s.highlight, s.highlight_to) {
-                if c1 != c2 {
-                    span = format!(
-                        "<mark style=\"background:linear-gradient(90deg,rgb({},{},{}),rgb({},{},{}));border-radius:3px;padding:0 2px;\">{span}</mark>",
-                        c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]
-                    );
-                } else {
-                    span = format!("<mark style=\"background-color:rgb({},{},{});\">{span}</mark>", c1[0], c1[1], c1[2]);
-                }
-            } else if let Some(c1) = s.highlight {
-                span = format!("<mark style=\"background-color:rgb({},{},{});\">{span}</mark>", c1[0], c1[1], c1[2]);
-            }
-            if let Some(url) = doc.link_url(s.link) {
-                span = format!("<a href=\"{url}\">{span}</a>");
-            }
-            out.push_str(&span);
-        }
-        out.push_str("</p>\n");
-    }
-    out.push_str("</body></html>\n");
-    out
+    crate::html::to_html(doc)
 }
 
 // ───────────────────────── RTF export / import ─────────────────────────
 
 pub fn to_rtf(doc: &Document) -> String {
-    let mut colors: Vec<[u8; 3]> = vec![[0, 0, 0]];
-    if doc.page.background != [255, 255, 255] && !colors.contains(&doc.page.background) {
-        colors.push(doc.page.background);
-    }
-    for p in &doc.paras {
-        if let Some(shd) = p.fmt.shading {
-            if !colors.contains(&shd) {
-                colors.push(shd);
-            }
-        }
-        for s in p.styles.iter().chain(std::iter::once(&p.end_style)) {
-            if !colors.contains(&s.color) {
-                colors.push(s.color);
-            }
-            if let Some(c2) = s.color_to {
-                if !colors.contains(&c2) {
-                    colors.push(c2);
-                }
-            }
-            if let Some(h) = s.highlight {
-                if !colors.contains(&h) {
-                    colors.push(h);
-                }
-            }
-            if let Some(h2) = s.highlight_to {
-                if !colors.contains(&h2) {
-                    colors.push(h2);
-                }
-            }
-        }
-    }
-    let mut out = format!("{{\\rtf1\\ansi\\deff{DEFAULT_FONT}{{\\fonttbl");
-    for i in 0..font_count() {
-        let f = font_name(i as u8);
-        out.push_str(&format!("{{\\f{i} {f};}}"));
-    }
-    out.push_str("}{\\colortbl;");
-    for c in &colors {
-        out.push_str(&format!("\\red{}\\green{}\\blue{};", c[0], c[1], c[2]));
-    }
-    out.push('}');
-    let pg = doc.page;
-    let tw = |inch: f32| (inch * 1440.0).round() as i32;
-    let pgbg_ci = if pg.background != [255, 255, 255] {
-        colors.iter().position(|c| *c == pg.background).map_or(0, |i| i + 1)
-    } else {
-        0
-    };
-    out.push_str(&format!(
-        "\\paperw{}\\paperh{}\\margl{}\\margr{}\\margt{}\\margb{}{}{}{}\n",
-        tw(pg.width),
-        tw(pg.height),
-        tw(pg.margin_left),
-        tw(pg.margin_right),
-        tw(pg.margin_top),
-        tw(pg.margin_bottom),
-        if pgbg_ci > 0 { format!("\\pgbg{pgbg_ci}") } else { String::new() },
-        if pg.page_numbers { "\\pgnum1" } else { "" },
-        if doc.pageless { "\\pageless1" } else { "" }
-    ));
-    if !doc.tables.is_empty() {
-        if let Ok(tbl_json) = serde_json::to_vec(&doc.tables) {
-            out.push_str(&format!("{{\\*\\syllabarytbls {}}}", base64_encode(&tbl_json)));
-        }
-    }
-    for (pi, p) in doc.paras.iter().enumerate() {
-        out.push_str("\\pard");
-        if p.fmt.table_id > 0 {
-            out.push_str(&format!("\\tblid{}\\tblrow{}\\tblcol{}", p.fmt.table_id, p.fmt.table_row, p.fmt.table_col));
-        }
-        if p.fmt.style > 0 {
-            out.push_str(&format!("\\s{}", p.fmt.style));
-        }
-        if p.fmt.page_break_before {
-            out.push_str("\\pagebb");
-        }
-        if p.fmt.hr {
-            out.push_str("\\brdrb");
-        }
-        if let Some(shd) = p.fmt.shading {
-            let si = colors.iter().position(|c| *c == shd).unwrap_or(0) + 1;
-            out.push_str(&format!("\\cbpat{si}"));
-        }
-        if p.fmt.bullet_preset > 0 {
-            out.push_str(&format!("\\bpreset{}", p.fmt.bullet_preset));
-        }
-        if p.fmt.image_id > 0 {
-            if let Some(img) = doc.image(p.fmt.image_id) {
-                out.push_str(&format!(
-                    "\\imgid{}\\imgw{}\\imgh{}\\imgcap{}",
-                    img.id,
-                    (img.width_in * 1440.0).round() as i32,
-                    (img.height_in * 1440.0).round() as i32,
-                    if img.caption.trim().is_empty() { 0 } else { 1 }
-                ));
-            }
-        }
-        out.push_str(match p.fmt.align {
-            Align::Left => "\\ql",
-            Align::Center => "\\qc",
-            Align::Right => "\\qr",
-            Align::Justify => "\\qj",
-        });
-        let li = p.fmt.indent as i32 * 720 + if p.fmt.list != ListKind::None { 360 } else { 0 };
-        if li > 0 {
-            out.push_str(&format!("\\li{li}"));
-        }
-        if p.fmt.list != ListKind::None {
-            out.push_str("\\fi-360");
-        }
-        out.push_str(&format!(
-            "\\sb{}\\sa{}\\sl{}\\slmult1 ",
-            (p.fmt.space_before * 20.0).round() as i32,
-            (p.fmt.space_after * 20.0).round() as i32,
-            (p.fmt.line_spacing * 240.0).round() as i32
-        ));
-        match p.fmt.list {
-            ListKind::Bullet => out.push_str("\\u8226?\\tab "),
-            ListKind::Number => out.push_str(&format!("{}.\\tab ", doc.list_number(pi))),
-            ListKind::Checklist => out.push_str(if p.fmt.checked { "\\u9745?\\tab " } else { "\\u9744?\\tab " }),
-            ListKind::None => {}
-        }
-        let runs = p.runs();
-        if runs.is_empty() {
-            let s = p.end_style;
-            let ci = colors.iter().position(|c| *c == s.color).unwrap_or(0) + 1;
-            out.push_str(&format!(
-                "{{\\f{}\\fs{}{}{}{}{}\\cf{} }}",
-                s.font,
-                (s.size * 2.0).round() as i32,
-                if s.bold { "\\b" } else { "" },
-                if s.italic { "\\i" } else { "" },
-                if s.underline { "\\ul" } else { "" },
-                if s.strike { "\\strike" } else { "" },
-                ci
-            ));
-        }
-        for (a, b, s) in runs {
-            out.push('{');
-            out.push_str(&format!("\\f{}\\fs{}", s.font, (s.size * 2.0).round() as i32));
-            if s.bold {
-                out.push_str("\\b");
-            }
-            if s.italic {
-                out.push_str("\\i");
-            }
-            if s.underline {
-                out.push_str("\\ul");
-            }
-            if s.strike {
-                out.push_str("\\strike");
-            }
-            if s.script > 0 {
-                out.push_str("\\super");
-            }
-            if s.script < 0 {
-                out.push_str("\\sub");
-            }
-            let ci = colors.iter().position(|c| *c == s.color).unwrap_or(0) + 1;
-            out.push_str(&format!("\\cf{ci}"));
-            if let Some(c2) = s.color_to {
-                let ci2 = colors.iter().position(|c| *c == c2).unwrap_or(0) + 1;
-                out.push_str(&format!("\\cfto{ci2}"));
-            }
-            if let Some(h) = s.highlight {
-                let hi = colors.iter().position(|c| *c == h).unwrap_or(0) + 1;
-                out.push_str(&format!("\\highlight{hi}"));
-            }
-            if let Some(h2) = s.highlight_to {
-                let hi2 = colors.iter().position(|c| *c == h2).unwrap_or(0) + 1;
-                out.push_str(&format!("\\hlto{hi2}"));
-            }
-            out.push(' ');
-            for ch in &p.text[a..b] {
-                match ch {
-                    '\\' => out.push_str("\\\\"),
-                    '{' => out.push_str("\\{"),
-                    '}' => out.push_str("\\}"),
-                    '\t' => out.push_str("\\tab "),
-                    c if (*c as u32) < 128 => out.push(*c),
-                    c => {
-                        let mut buf = [0u16; 2];
-                        for u in c.encode_utf16(&mut buf) {
-                            out.push_str(&format!("\\u{}?", *u as i16));
-                        }
-                    }
-                }
-            }
-            out.push('}');
-        }
-        out.push_str("\\par\n");
-    }
-    out.push('}');
-    out
+    crate::rtf::to_rtf(doc)
 }
 
-/// RTF reader: parses page setup, font & color tables, paragraph styles/spacing/indents/lists,
-/// and character styling (fonts, sizes, colors, highlights, gradients, scripts).
 pub fn from_rtf(src: &str) -> Document {
-    let mut doc = Document { paras: vec![Para::new(CharStyle::default(), ParaFmt::default())], ..Default::default() };
-    let styles = named_styles();
-    let mut fonts: std::collections::HashMap<i32, u8> = Default::default();
-    let mut colors: Vec<[u8; 3]> = vec![[0, 0, 0]]; // index 0 is auto/black
-    let mut stack: Vec<(CharStyle, bool)> = Vec::new();
-    let mut st = CharStyle::default();
-    let mut skip = false;
-    let chars: Vec<char> = src.chars().collect();
-    let mut i = 0;
-    let mut pos = Pos::new(0, 0);
-    let mut in_fonttbl = false;
-    let mut in_colortbl = false;
-    let mut in_scribetbls = false;
-    let mut scribetbls_b64 = String::new();
-    let mut cur_rgb: [u8; 3] = [0, 0, 0];
-    let mut has_rgb = false;
-    let mut font_num = 0;
-    let mut font_name = String::new();
-    let mut uc_skip = 0usize;
-    let mut raw_li: Vec<i32> = vec![0];
-    let mut raw_fi: Vec<i32> = vec![0];
-    let mut raw_img_dims: Vec<(u64, f32, f32, bool)> = vec![(0, 0.0, 0.0, false)];
-
-    while i < chars.len() {
-        let c = chars[i];
-        match c {
-            '{' => {
-                stack.push((st, skip));
-                i += 1;
-                if i < chars.len() && chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '*' {
-                    skip = true;
-                }
-            }
-            '}' => {
-                if in_fonttbl && !font_name.is_empty() {
-                    fonts.insert(font_num, font_index(font_name.trim().trim_end_matches(';')));
-                    font_name.clear();
-                }
-                if in_colortbl {
-                    if has_rgb {
-                        colors.push(cur_rgb);
-                        cur_rgb = [0, 0, 0];
-                        has_rgb = false;
-                    }
-                    in_colortbl = false;
-                }
-                if in_scribetbls {
-                    if let Some(bytes) = base64_decode(scribetbls_b64.trim()) {
-                        if let Ok(tbls) = serde_json::from_slice::<Vec<DocTable>>(&bytes) {
-                            doc.tables = tbls;
-                        }
-                    }
-                    scribetbls_b64.clear();
-                    in_scribetbls = false;
-                }
-                if let Some((s, k)) = stack.pop() {
-                    st = s;
-                    skip = k;
-                }
-                if in_fonttbl && stack.len() <= 1 {
-                    in_fonttbl = false;
-                    skip = false;
-                }
-                i += 1;
-            }
-            '\\' => {
-                i += 1;
-                if i >= chars.len() {
-                    break;
-                }
-                let c2 = chars[i];
-                if !c2.is_ascii_alphabetic() {
-                    i += 1;
-                    match c2 {
-                        '\\' | '{' | '}' if !skip => pos = doc.insert_text(pos, &c2.to_string(), st),
-                        '\'' => {
-                            let hex: String = chars[i..(i + 2).min(chars.len())].iter().collect();
-                            i += 2;
-                            if uc_skip > 0 {
-                                uc_skip -= 1;
-                            } else if !skip {
-                                if let Ok(v) = u8::from_str_radix(&hex, 16) {
-                                    let ch = cp1252(v);
-                                    pos = doc.insert_text(pos, &ch.to_string(), st);
-                                }
-                            }
-                        }
-                        '~' if !skip => pos = doc.insert_text(pos, "\u{a0}", st),
-                        '*' => skip = true,
-                        _ => {}
-                    }
-                    continue;
-                }
-                let start = i;
-                while i < chars.len() && chars[i].is_ascii_alphabetic() {
-                    i += 1;
-                }
-                let word: String = chars[start..i].iter().collect();
-                let nstart = i;
-                if i < chars.len() && (chars[i] == '-' || chars[i].is_ascii_digit()) {
-                    i += 1;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-                let num: Option<i32> = if i > nstart { chars[nstart..i].iter().collect::<String>().parse().ok() } else { None };
-                if i < chars.len() && chars[i] == ' ' {
-                    i += 1;
-                }
-                let on = num != Some(0);
-                match word.as_str() {
-                    "fonttbl" => {
-                        in_fonttbl = true;
-                        skip = true;
-                    }
-                    "colortbl" => {
-                        in_colortbl = true;
-                        skip = true;
-                        colors.clear();
-                    }
-                    "red" if in_colortbl => {
-                        cur_rgb[0] = num.unwrap_or(0).clamp(0, 255) as u8;
-                        has_rgb = true;
-                    }
-                    "green" if in_colortbl => {
-                        cur_rgb[1] = num.unwrap_or(0).clamp(0, 255) as u8;
-                        has_rgb = true;
-                    }
-                    "blue" if in_colortbl => {
-                        cur_rgb[2] = num.unwrap_or(0).clamp(0, 255) as u8;
-                        has_rgb = true;
-                    }
-                    "stylesheet" | "info" | "pict" | "header" | "footer" | "listtable" | "listoverridetable" | "generator" => skip = true,
-                    "paperw" => {
-                        if let Some(n) = num {
-                            doc.page.width = ((n as f32 / 1440.0 * 100.0).round() / 100.0).clamp(1.0, 40.0);
-                        }
-                    }
-                    "paperh" => {
-                        if let Some(n) = num {
-                            doc.page.height = ((n as f32 / 1440.0 * 100.0).round() / 100.0).clamp(1.0, 40.0);
-                        }
-                    }
-                    "margl" => {
-                        if let Some(n) = num {
-                            let raw = (n as f32 / 1440.0).clamp(0.0, 10.0);
-                            let snapped = (raw * 100.0).round() / 100.0;
-                            doc.page.margin_left = if (raw - snapped).abs() < 0.0005 { snapped } else { raw };
-                        }
-                    }
-                    "margr" => {
-                        if let Some(n) = num {
-                            let raw = (n as f32 / 1440.0).clamp(0.0, 10.0);
-                            let snapped = (raw * 100.0).round() / 100.0;
-                            doc.page.margin_right = if (raw - snapped).abs() < 0.0005 { snapped } else { raw };
-                        }
-                    }
-                    "margt" => {
-                        if let Some(n) = num {
-                            let raw = (n as f32 / 1440.0).clamp(0.0, 10.0);
-                            let snapped = (raw * 100.0).round() / 100.0;
-                            doc.page.margin_top = if (raw - snapped).abs() < 0.0005 { snapped } else { raw };
-                        }
-                    }
-                    "margb" => {
-                        if let Some(n) = num {
-                            let raw = (n as f32 / 1440.0).clamp(0.0, 10.0);
-                            let snapped = (raw * 100.0).round() / 100.0;
-                            doc.page.margin_bottom = if (raw - snapped).abs() < 0.0005 { snapped } else { raw };
-                        }
-                    }
-                    "pgbg" => {
-                        if let Some(n) = num {
-                            if let Some(c) = colors.get(n as usize) {
-                                doc.page.background = *c;
-                            }
-                        }
-                    }
-                    "pgnum" => doc.page.page_numbers = on,
-                    "pageless" => doc.pageless = on,
-                    "f" if in_fonttbl => font_num = num.unwrap_or(0),
-                    "f" => {
-                        st.font = *fonts.get(&num.unwrap_or(0)).unwrap_or(&DEFAULT_FONT);
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "fs" => {
-                        st.size = (num.unwrap_or(24) as f32 / 2.0).clamp(1.0, MAX_SIZE);
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "b" => {
-                        st.bold = on;
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "i" => {
-                        st.italic = on;
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "ul" => {
-                        st.underline = on;
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "ulnone" => {
-                        st.underline = false;
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "strike" => {
-                        st.strike = on;
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "super" => st.script = 1,
-                    "sub" => st.script = -1,
-                    "nosupersub" => st.script = 0,
-                    "cf" => {
-                        let idx = num.unwrap_or(0).max(0) as usize;
-                        st.color = colors.get(idx).copied().unwrap_or([0, 0, 0]);
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "cfto" => {
-                        let idx = num.unwrap_or(0).max(0) as usize;
-                        st.color_to = colors.get(idx).copied();
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "highlight" | "chcbpat" => {
-                        let idx = num.unwrap_or(0).max(0) as usize;
-                        st.highlight = if idx == 0 { None } else { colors.get(idx).copied() };
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "hlto" => {
-                        let idx = num.unwrap_or(0).max(0) as usize;
-                        st.highlight_to = if idx == 0 { None } else { colors.get(idx).copied() };
-                        doc.paras[pos.p].end_style = st;
-                    }
-                    "cbpat" => {
-                        let idx = num.unwrap_or(0).max(0) as usize;
-                        doc.paras[pos.p].fmt.shading = if idx == 0 { None } else { colors.get(idx).copied() };
-                    }
-                    "plain" => st = CharStyle::default(),
-                    "par" | "line" if !skip => {
-                        pos = doc.split(pos);
-                        raw_li.push(0);
-                        raw_fi.push(0);
-                        raw_img_dims.push((0, 0.0, 0.0, false));
-                    }
-                    "tab" if !skip => pos = doc.insert_text(pos, "\t", st),
-                    "qc" => doc.paras[pos.p].fmt.align = Align::Center,
-                    "qr" => doc.paras[pos.p].fmt.align = Align::Right,
-                    "qj" => doc.paras[pos.p].fmt.align = Align::Justify,
-                    "ql" => doc.paras[pos.p].fmt.align = Align::Left,
-                    "s" => {
-                        let idx = num.unwrap_or(0).max(0) as usize;
-                        if idx < styles.len() {
-                            doc.paras[pos.p].fmt = ParaFmt { style: idx, ..styles[idx].fmt };
-                            doc.paras[pos.p].end_style = styles[idx].chr;
-                        }
-                    }
-                    "pagebb" => doc.paras[pos.p].fmt.page_break_before = true,
-                    "brdrb" => doc.paras[pos.p].fmt.hr = true,
-                    "bpreset" => doc.paras[pos.p].fmt.bullet_preset = num.unwrap_or(0).clamp(0, 255) as u8,
-                    "syllabarytbls" | "scribetbls" => {
-                        in_scribetbls = true;
-                        skip = true;
-                    }
-                    "tblid" => doc.paras[pos.p].fmt.table_id = num.unwrap_or(0).max(0) as u32,
-                    "tblrow" => doc.paras[pos.p].fmt.table_row = num.unwrap_or(0).max(0) as u16,
-                    "tblcol" => doc.paras[pos.p].fmt.table_col = num.unwrap_or(0).max(0) as u16,
-                    "imgid" => {
-                        let id = num.unwrap_or(0).max(0) as u64;
-                        doc.paras[pos.p].fmt.image_id = id;
-                        if let Some(slot) = raw_img_dims.get_mut(pos.p) {
-                            slot.0 = id;
-                        }
-                    }
-                    "imgw" => {
-                        if let Some(slot) = raw_img_dims.get_mut(pos.p) {
-                            slot.1 = (num.unwrap_or(2880) as f32 / 1440.0).clamp(0.5, 20.0);
-                        }
-                    }
-                    "imgh" => {
-                        if let Some(slot) = raw_img_dims.get_mut(pos.p) {
-                            slot.2 = (num.unwrap_or(2160) as f32 / 1440.0).clamp(0.5, 20.0);
-                        }
-                    }
-                    "imgcap" => {
-                        if let Some(slot) = raw_img_dims.get_mut(pos.p) {
-                            slot.3 = on;
-                        }
-                    }
-                    "sb" => {
-                        if let Some(n) = num {
-                            doc.paras[pos.p].fmt.space_before = (n as f32 / 20.0).clamp(0.0, 72.0);
-                        }
-                    }
-                    "sa" => {
-                        if let Some(n) = num {
-                            doc.paras[pos.p].fmt.space_after = (n as f32 / 20.0).clamp(0.0, 72.0);
-                        }
-                    }
-                    "sl" => {
-                        if let Some(n) = num {
-                            doc.paras[pos.p].fmt.line_spacing = (n.abs() as f32 / 240.0).clamp(1.0, 3.0);
-                        }
-                    }
-                    "li" => {
-                        if let Some(n) = num {
-                            if let Some(slot) = raw_li.get_mut(pos.p) {
-                                *slot = n;
-                            }
-                            doc.paras[pos.p].fmt.indent = ((n as f32 / 720.0).floor().max(0.0) as u8).min(8);
-                        }
-                    }
-                    "fi" => {
-                        if let Some(n) = num {
-                            if let Some(slot) = raw_fi.get_mut(pos.p) {
-                                *slot = n;
-                            }
-                        }
-                    }
-                    "pard" => {
-                        doc.paras[pos.p].fmt = ParaFmt::default();
-                        if let Some(slot) = raw_li.get_mut(pos.p) {
-                            *slot = 0;
-                        }
-                        if let Some(slot) = raw_fi.get_mut(pos.p) {
-                            *slot = 0;
-                        }
-                    }
-                    "u" if !skip => {
-                        if let Some(n) = num {
-                            let v = if n < 0 { (n + 65536) as u32 } else { n as u32 };
-                            if let Some(ch) = char::from_u32(v) {
-                                pos = doc.insert_text(pos, &ch.to_string(), st);
-                            }
-                            uc_skip = 1;
-                            if i < chars.len() && chars[i] == '?' {
-                                i += 1;
-                                uc_skip = 0;
-                            }
-                        }
-                    }
-                    "emdash" if !skip => pos = doc.insert_text(pos, "—", st),
-                    "endash" if !skip => pos = doc.insert_text(pos, "–", st),
-                    "bullet" if !skip => pos = doc.insert_text(pos, "•", st),
-                    "lquote" if !skip => pos = doc.insert_text(pos, "‘", st),
-                    "rquote" if !skip => pos = doc.insert_text(pos, "’", st),
-                    "ldblquote" if !skip => pos = doc.insert_text(pos, "“", st),
-                    "rdblquote" if !skip => pos = doc.insert_text(pos, "”", st),
-                    _ => {}
-                }
-            }
-            '\r' | '\n' => i += 1,
-            _ => {
-                if in_colortbl && c == ';' {
-                    colors.push(cur_rgb);
-                    cur_rgb = [0, 0, 0];
-                    has_rgb = false;
-                } else if in_fonttbl {
-                    font_name.push(c);
-                } else if in_scribetbls {
-                    scribetbls_b64.push(c);
-                } else if !skip {
-                    if uc_skip > 0 {
-                        uc_skip -= 1;
-                    } else {
-                        pos = doc.insert_text(pos, &c.to_string(), st);
-                    }
-                }
-                i += 1;
-            }
-        }
-    }
-    // drop trailing empty paragraph created by the last \par
-    if doc.paras.len() > 1 && doc.paras.last().is_some_and(|p| p.text.is_empty()) {
-        doc.paras.pop();
-    }
-    // Reconstruct list markers (\u8226?\tab, \u9744?\tab, \u9745?\tab, N.\tab) and empty-para padding
-    for (pi, p) in doc.paras.iter_mut().enumerate() {
-        let li = raw_li.get(pi).copied().unwrap_or(0);
-        let fi = raw_fi.get(pi).copied().unwrap_or(0);
-        if fi < 0 || p.text.first().is_some_and(|&c| c == '•' || c == '☐' || c == '☑') {
-            if p.text.len() >= 2 && p.text[1] == '\t' {
-                match p.text[0] {
-                    '•' => {
-                        p.fmt.list = ListKind::Bullet;
-                        p.text.drain(0..2);
-                        p.styles.drain(0..2);
-                    }
-                    '☐' => {
-                        p.fmt.list = ListKind::Checklist;
-                        p.fmt.checked = false;
-                        p.text.drain(0..2);
-                        p.styles.drain(0..2);
-                    }
-                    '☑' => {
-                        p.fmt.list = ListKind::Checklist;
-                        p.fmt.checked = true;
-                        p.text.drain(0..2);
-                        p.styles.drain(0..2);
-                    }
-                    _ => {}
-                }
-            } else if let Some(tab_pos) = p.text.iter().position(|&c| c == '\t') {
-                if tab_pos >= 2 && p.text[tab_pos - 1] == '.' && p.text[..tab_pos - 1].iter().all(|c| c.is_ascii_digit()) {
-                    p.fmt.list = ListKind::Number;
-                    p.text.drain(0..=tab_pos);
-                    p.styles.drain(0..=tab_pos);
-                }
-            }
-            if p.fmt.list != ListKind::None {
-                p.fmt.indent = (((li - 360).max(0) as f32 / 720.0).round() as u8).min(8);
-            }
-        }
-        // Empty paragraphs emitted as `{\fN\fsM }` have a single space placeholder
-        if p.text.len() == 1 && p.text[0] == ' ' {
-            p.end_style = p.styles[0];
-            p.text.clear();
-            p.styles.clear();
-        }
-        if let Some(&(id, w_in, h_in, has_cap)) = raw_img_dims.get(pi) {
-            if id > 0 && w_in > 0.0 && h_in > 0.0 && !doc.images.iter().any(|im| im.id == id) {
-                let para_cap: String = p.text.iter().collect();
-                doc.images.push(DocImage {
-                    id,
-                    name: format!("Image {id}"),
-                    natural_size: [(w_in * 96.0).round() as u32, (h_in * 96.0).round() as u32],
-                    width_in: w_in,
-                    height_in: h_in,
-                    caption: if !para_cap.is_empty() {
-                        para_cap
-                    } else if has_cap {
-                        format!("Image {id}")
-                    } else {
-                        String::new()
-                    },
-                    png_b64: String::new(),
-                    seamless: false,
-                });
-            }
-        }
-    }
-    doc
-}
-
-fn cp1252(v: u8) -> char {
-    const HI: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
-    ];
-    if (0x80..0xa0).contains(&v) {
-        HI[(v - 0x80) as usize]
-    } else {
-        v as char
-    }
+    crate::rtf::from_rtf(src)
 }
 
 // ───────────────────────── SmartCorrect ─────────────────────────
@@ -4633,7 +3935,7 @@ mod tests {
         let line_spacing = [1.0, 1.15, 1.5, 2.0][seed % 4];
         let space_before = (seed % 4) as f32 * 3.0;
         let space_after = ((seed + 1) % 5) as f32 * 3.0;
-        let font_idx = (seed % 14) as u8; // system/core fonts 0..14
+        let font_idx = (seed % 14) as u16; // system/core fonts 0..14
         let font_size = [10.0, 11.0, 12.0, 14.0, 16.0][seed % 5];
         let base_chr = CharStyle { font: font_idx, size: font_size, ..CharStyle::default() };
         let mut p_body = Para::new(
@@ -5078,6 +4380,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn table_cell_arithmetic_add_subtract_multiply_divide() {
+        let mut doc = Document::default();
+        let pos = doc.insert_table(Pos::new(0, 0), 6, 4);
+        let tid = doc.paras[pos.p].fmt.table_id;
+        // Item | Qty | Price | Line total
+        doc.set_cell_text(tid, 1, 1, "3");
+        doc.set_cell_text(tid, 1, 2, "$12.50");
+        doc.set_cell_text(tid, 2, 1, "2");
+        doc.set_cell_text(tid, 2, 2, "$4.25");
+        // typed formulas are recognised and evaluated
+        doc.set_cell_text(tid, 1, 3, "=B2*C2");
+        doc.set_cell_text(tid, 2, 3, "=B3 × C3");
+        doc.evaluate_table_formulas(tid);
+        assert_eq!(doc.cell_text(tid, 1, 3), "$37.50");
+        assert_eq!(doc.cell_text(tid, 2, 3), "$8.50");
+        doc.table_set_cell_formula(tid, 3, 3, Some("=D2+D3".into()));
+        assert_eq!(doc.cell_text(tid, 3, 3), "$46.00");
+        doc.table_set_cell_formula(tid, 4, 3, Some("=D4-D3".into()));
+        assert_eq!(doc.cell_text(tid, 4, 3), "$37.50");
+        doc.table_set_cell_formula(tid, 5, 3, Some("=(D2+D3)/B2".into()));
+        assert_eq!(doc.cell_text(tid, 5, 3), "$15.33");
+        doc.table_set_cell_formula(tid, 5, 1, Some("=B2/C4".into()));
+        assert_eq!(doc.cell_text(tid, 5, 1), "#DIV/0!");
+        // changing an input recalculates every dependent formula
+        doc.set_cell_text(tid, 1, 1, "4");
+        doc.evaluate_table_formulas(tid);
+        assert_eq!(doc.cell_text(tid, 1, 3), "$50.00");
+        assert_eq!(doc.cell_text(tid, 3, 3), "$58.50");
+        // aggregates still behave exactly as before and can be combined with arithmetic
+        doc.table_set_cell_formula(tid, 5, 2, Some("=SUM(C2:C3)*2".into()));
+        assert_eq!(doc.cell_text(tid, 5, 2), "$33.50");
     }
 
     #[test]

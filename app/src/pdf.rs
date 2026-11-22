@@ -24,7 +24,7 @@ const FAMILIES: [[&str; 4]; 3] = [
     ["Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"],
 ];
 
-fn family_of(font: u8) -> usize {
+fn family_of(font: u16) -> usize {
     match crate::doc::font_category(font) {
         crate::doc::FontCat::Serif => 0,
         crate::doc::FontCat::Mono => 2,
@@ -343,26 +343,9 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
     // Pre-shape header, footer & image caption galleys so their glyphs are present in the font atlas
     let pt = lay.ppi / 72.0;
     let hf_size = 10.0 * pt;
-    let hf_col = Color32::from_rgb(95, 95, 95);
     type RichFooterLayout = (Option<(f32, f32, f32, f32, [u8; 3])>, Vec<(FooterSegment, Arc<Galley>)>);
     let (header_galley, rich_footer_galleys, footer_galleys, caption_galleys) = ctx.fonts_mut(|fonts| {
-        let hg = if !doc.header.is_empty() {
-            let (fam, fake_it) = book.family(0, false, doc.header_italic);
-            let mut job = LayoutJob::default();
-            job.append(
-                &doc.header,
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(hf_size, fam),
-                    color: hf_col,
-                    italics: fake_it,
-                    ..Default::default()
-                },
-            );
-            Some(fonts.layout_job(job))
-        } else {
-            None
-        };
+        let hg = if !doc.header.is_empty() { Some(layout::hf_galley(fonts, book, doc, false, &doc.header, lay.ppi)) } else { None };
         let mut rfgs: Vec<Option<RichFooterLayout>> = Vec::with_capacity(lay.pages);
         let mut fgs: Vec<Option<Arc<Galley>>> = Vec::with_capacity(lay.pages);
         for k in 0..lay.pages {
@@ -391,25 +374,13 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 continue;
             }
             rfgs.push(None);
-            let mut foot = doc.footer.clone();
+            let mut foot = crate::doc::update_footer_page_nums(&doc.footer, k + 1, lay.pages);
             if doc.page.page_numbers {
                 let pn = format!("Page {}", k + 1);
                 foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
             }
             if !foot.is_empty() {
-                let (fam, fake_it) = book.family(0, false, doc.footer_italic);
-                let mut job = LayoutJob::default();
-                job.append(
-                    &foot,
-                    0.0,
-                    TextFormat {
-                        font_id: FontId::new(hf_size, fam),
-                        color: hf_col,
-                        italics: fake_it,
-                        ..Default::default()
-                    },
-                );
-                fgs.push(Some(fonts.layout_job(job)));
+                fgs.push(Some(layout::hf_galley(fonts, book, doc, true, &foot, lay.ppi)));
             } else {
                 fgs.push(None);
             }
@@ -449,7 +420,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 Align::Center => lay.content_offset.x + (lay.content_size.x - gw) * 0.5,
                 Align::Right => (lay.content_offset.x + lay.content_size.x - gw).max(lay.content_offset.x),
             };
-            let hy = (lay.content_offset.y * 0.5 - gh * 0.5).max(3.0 * scale);
+            let hy = layout::hf_y(doc, &lay, false, gh);
             canvas.blit_galley(hg, &atlas, hx, hy, ppp);
         }
         if let Some(Some((rule, seg_gals))) = rich_footer_galleys.get(k) {
@@ -486,8 +457,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 Align::Center => lay.content_offset.x + (lay.content_size.x - gw) * 0.5,
                 Align::Right => (lay.content_offset.x + lay.content_size.x - gw).max(lay.content_offset.x),
             };
-            let bottom_margin = (lay.page_size.y - lay.content_offset.y - lay.content_size.y).max(gh + 4.0 * scale);
-            let fy = lay.page_size.y - (bottom_margin * 0.42 + gh * 0.5).clamp(gh + 3.0 * scale, 30.0 * pt + gh * 0.5);
+            let fy = layout::hf_y(doc, &lay, true, gh);
             canvas.blit_galley(fg, &atlas, fx, fy, ppp);
         }
 
@@ -546,11 +516,17 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
 
         // Paragraph background shading
         if let Some(sh) = pfmt.shading {
-            let x0 = (content_x - 6.0 * scale) * ppp;
+            let (bx0, bx1) = if pfmt.table_id > 0 { (0.0, lay.content_size.x) } else { layout::para_block_x(doc, &lay, l.para) };
+            let x0 = (content_x + bx0 - 6.0 * scale) * ppp;
             let y0 = (oy - 1.0 * scale) * ppp;
-            let x1 = (content_x + lay.content_size.x + 6.0 * scale) * ppp;
+            let x1 = (content_x + bx1 + 6.0 * scale) * ppp;
             let y1 = (oy + l.height + 1.0 * scale) * ppp;
             canvas.fill_gradient_pill(x0, y0, x1, y1, 4.0 * scale * ppp, sh, sh);
+        }
+        // Paragraph borders
+        for (r, c) in layout::para_border_rects(doc, &lay, l) {
+            let r = r.translate(egui::vec2(content_x, lay.content_offset.y));
+            canvas.fill_gradient_pill(r.min.x * ppp, r.min.y * ppp, r.max.x * ppp, r.max.y * ppp, 0.0, c, c);
         }
         // Quote left accent bar
         if pfmt.style == 7 {
@@ -582,7 +558,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
 
         // Embedded image block + caption
         if pfmt.image_id > 0 && l.first_in_para {
-            let indent = pfmt.indent as f32 * 0.5 * lay.ppi;
+            let indent = doc.block_left_in(&pfmt).max(0.0) * lay.ppi + pfmt.right_in * lay.ppi;
             let cell_avail = if pfmt.table_id > 0 {
                 lay.cells
                     .iter()
@@ -658,6 +634,9 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
 
         // Blit shaped text glyphs from the atlas
         canvas.blit_galley(&l.galley, &atlas, ox, oy, ppp);
+        for (r, rad, c) in layout::leader_marks(l) {
+            canvas.fill_gradient_pill((ox + r.min.x) * ppp, (oy + r.min.y) * ppp, (ox + r.max.x) * ppp, (oy + r.max.y) * ppp, rad * ppp, c, c);
+        }
 
         // Underline and strikethrough bars (with exact link, checklist, and Craft gradient colors)
         if let Some(placed) = l.galley.rows.first() {
@@ -807,10 +786,16 @@ pub fn export_page_range(ctx: &egui::Context, doc: &Document, book: &FontBook, p
         if pg.background != [255, 255, 255] {
             page.rect(pg.background, 0.0, 0.0, pw, ph);
         }
-        let gray = [110, 110, 110];
         if !doc.header.is_empty() {
-            let y = ph - lay.content_offset.y * 0.5 - 3.5;
-            page.text(4, 10.0, gray, (pw - approx_width(&doc.header, 10.0)) / 2.0, y, &doc.header);
+            let st = layout::hf_style(doc, false);
+            let w = approx_width(&doc.header, st.size);
+            let x = match doc.header_align {
+                Align::Left | Align::Justify => lay.content_offset.x,
+                Align::Center => (pw - w) * 0.5,
+                Align::Right => (lay.content_offset.x + lay.content_size.x - w).max(lay.content_offset.x),
+            };
+            let top = layout::hf_y(doc, &lay, false, st.size * 1.2);
+            page.text(font_res(&st), st.size, st.color, x, ph - top - st.size * 0.9, &doc.header);
         }
         if let Some(pf) = doc.resolved_page_footer(k, lay.pages) {
             if let Some((x0, x1, y_bot, w_pt, col)) = pf.rule {
@@ -833,22 +818,21 @@ pub fn export_page_range(ctx: &egui::Context, doc: &Document, book: &FontBook, p
                 }
             }
         } else {
-            let mut foot = doc.footer.clone();
+            let mut foot = crate::doc::update_footer_page_nums(&doc.footer, k + 1, lay.pages);
             if pg.page_numbers {
                 let pn = format!("Page {}", k + 1);
                 foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
             }
             if !foot.is_empty() {
-                let bottom = ph - lay.content_offset.y - lay.content_size.y;
-                let fw = approx_width(&foot, 10.0);
+                let st = layout::hf_style(doc, true);
+                let fw = approx_width(&foot, st.size);
                 let fx = match doc.footer_align {
                     Align::Left | Align::Justify => lay.content_offset.x,
                     Align::Center => (pw - fw) * 0.5,
                     Align::Right => (lay.content_offset.x + lay.content_size.x - fw).max(lay.content_offset.x),
                 };
-                let fid = if doc.footer_italic { 6 } else { 4 };
-                let fy = (bottom * 0.42 - 3.5).clamp(6.0, 28.0);
-                page.text(fid, 10.0, gray, fx, fy, &foot);
+                let top = layout::hf_y(doc, &lay, true, st.size * 1.2);
+                page.text(font_res(&st), st.size, st.color, fx, ph - top - st.size * 0.9, &foot);
             }
         }
     }
@@ -1185,5 +1169,50 @@ mod sample {
         out.textures_delta.clear();
         std::fs::write("shots/sample.pdf", bytes).unwrap();
         std::fs::write("shots/sample.docx", crate::docx::write(&doc)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod render_probe {
+    /// Renders the files listed in SYLLABARY_RENDER (";"-separated) to PNG pages in SYLLABARY_OUT.
+    #[test]
+    #[ignore]
+    fn render_files_to_png() {
+        let list = std::env::var("SYLLABARY_RENDER").unwrap_or_default();
+        let out_dir = std::env::var("SYLLABARY_OUT").unwrap_or_else(|_| ".".into());
+        let ctx = eframe::egui::Context::default();
+        let mut book = crate::fonts::FontBook::default();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            book = crate::fonts::install(&ctx);
+        });
+        out.textures_delta.clear();
+        for (fi, path) in list.split(';').filter(|p| !p.is_empty()).enumerate() {
+            let bytes = std::fs::read(path).unwrap();
+            let ext = std::path::Path::new(path)
+                .extension()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase();
+            let doc = match ext.as_str() {
+                "docx" => crate::docx::read(&bytes).unwrap(),
+                "pdf" => crate::pdf_import::read(&bytes).unwrap(),
+                "rtf" => {
+                    crate::doc::from_rtf(&bytes.iter().map(|&b| b as char).collect::<String>())
+                }
+                "md" => crate::doc::from_markdown(&crate::doc::decode_text(&bytes)),
+                "gdoc" => crate::doc::from_gdoc(&crate::doc::decode_text(&bytes)).unwrap(),
+                _ => crate::doc::from_plain(&crate::doc::decode_text(&bytes)),
+            };
+            let mut pages = Vec::new();
+            let mut out = ctx.run_ui(Default::default(), |_ui| {
+                pages = super::render_pages_rgba(&ctx, &doc, &book, 1.0);
+            });
+            out.textures_delta.clear();
+            for (pi, (w, h, rgba)) in pages.iter().enumerate().take(3) {
+                let img = image::RgbaImage::from_raw(*w, *h, rgba.clone()).unwrap();
+                img.save(format!("{out_dir}/f{fi}_p{pi}.png")).unwrap();
+            }
+            println!("RENDERED {path} pages={}", pages.len());
+        }
     }
 }

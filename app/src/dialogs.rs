@@ -55,6 +55,8 @@ pub enum Dialog {
         use_left: bool,
         chosen: Vec<(usize, usize)>,
         keep_sig_figs: bool,
+        /// Some(expression) = arithmetic mode (`B2*C2`, `(D2+D3)/B2`, …)
+        expr: Option<String>,
     },
 }
 
@@ -912,6 +914,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             mut use_left,
             mut chosen,
             mut keep_sig_figs,
+            mut expr,
         } => {
             table_math_dialog(
                 app,
@@ -925,6 +928,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 &mut use_left,
                 &mut chosen,
                 &mut keep_sig_figs,
+                &mut expr,
             );
             if open && matches!(app.dialog, Dialog::TableMath { .. }) {
                 app.dialog = Dialog::TableMath {
@@ -936,6 +940,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     use_left,
                     chosen,
                     keep_sig_figs,
+                    expr,
                 };
             }
         }
@@ -2489,6 +2494,7 @@ fn table_math_dialog(
     use_left: &mut bool,
     chosen: &mut Vec<(usize, usize)>,
     keep_sig_figs: &mut bool,
+    expr: &mut Option<String>,
 ) {
     let Some(tbl_snap) = app.tab_ref().doc.table(table_id).cloned() else {
         *open = false;
@@ -2510,7 +2516,14 @@ fn table_math_dialog(
             .join(", ")
     };
     let suffix = if *keep_sig_figs { "" } else { ";RAW" };
-    let built_formula = if args_part.is_empty() {
+    let built_formula = if let Some(e) = expr.as_ref() {
+        let e = e.trim().trim_start_matches('=').trim();
+        if e.is_empty() {
+            String::new()
+        } else {
+            format!("={e}")
+        }
+    } else if args_part.is_empty() {
         String::new()
     } else {
         format!("={}({}{})", op.name(), args_part, suffix)
@@ -2521,15 +2534,28 @@ fn table_math_dialog(
         app.tab_ref()
             .doc
             .preview_table_formula(table_id, target_row, target_col, &built_formula)
-            .unwrap_or_else(|| "0".to_string())
+            .unwrap_or_else(|| {
+                if expr.is_some() {
+                    "(incomplete formula)".to_string()
+                } else {
+                    "0".to_string()
+                }
+            })
     };
+    let formula_ok = !built_formula.is_empty()
+        && (expr.is_none()
+            || app
+                .tab_ref()
+                .doc
+                .preview_table_formula(table_id, target_row, target_col, &built_formula)
+                .is_some());
 
     window(&format!("Table Cell Math — Cell {target_label}"))
         .open(open)
         .show(ctx, |ui| {
             ui.set_min_width(440.0);
             ui.label(
-                RichText::new("Calculate Sum (Total), Subtotal, Average, or Median directly in your document table.")
+                RichText::new("Calculate Sum (Total), Subtotal, Average or Median, or add, subtract, multiply and divide across cells.")
                     .weak()
                     .small(),
             );
@@ -2543,14 +2569,43 @@ fn table_math_dialog(
                     TableMathOp::Average,
                     TableMathOp::Median,
                 ] {
-                    if ui.selectable_label(*op == candidate, candidate.label()).clicked() {
+                    if ui.selectable_label(expr.is_none() && *op == candidate, candidate.label()).clicked() {
                         *op = candidate;
+                        *expr = None;
                     }
+                }
+                if ui
+                    .selectable_label(expr.is_some(), "Arithmetic (+ − × ÷)")
+                    .on_hover_text("Build a formula such as B2*C2, (D2+D3)/B2 or SUM(ABOVE)*1.07")
+                    .clicked()
+                    && expr.is_none()
+                {
+                    *expr = Some(String::new());
                 }
             });
 
+            if let Some(e) = expr.as_mut() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Formula:").strong());
+                    ui.label(RichText::new("=").monospace());
+                    ui.add(egui::TextEdit::singleline(e).font(egui::TextStyle::Monospace).desired_width(260.0).hint_text("B2*C2"));
+                });
+                ui.horizontal(|ui| {
+                    for (label, ins) in [("+", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")"), ("SUM(ABOVE)", "SUM(ABOVE)")] {
+                        if ui.button(RichText::new(label).monospace()).clicked() {
+                            e.push_str(ins);
+                        }
+                    }
+                    if ui.button("⌫").on_hover_text("Delete the last character").clicked() {
+                        e.pop();
+                    }
+                });
+                ui.label(RichText::new("Click cells below to insert their references (A1 is the top-left cell). Empty cells count as 0.").weak().small());
+            }
+
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            if expr.is_none() { ui.horizontal(|ui| {
                 ui.label(RichText::new("Input Cells:").strong());
                 if ui
                     .selectable_label(*use_above, "Column Above (ABOVE)")
@@ -2587,7 +2642,7 @@ fn table_math_dialog(
                     *use_above = false;
                     *use_left = false;
                 }
-            });
+            }); }
 
             ui.add_space(4.0);
             ui.label(
@@ -2615,6 +2670,8 @@ fn table_math_dialog(
                                 let is_target = (r_idx, c_idx) == (target_row, target_col);
                                 let is_selected = if is_target {
                                     false
+                                } else if let Some(e) = expr.as_ref() {
+                                    e.to_ascii_uppercase().contains(&coord)
                                 } else if *use_above {
                                     c_idx == target_col && r_idx < target_row
                                 } else if *use_left {
@@ -2623,7 +2680,15 @@ fn table_math_dialog(
                                     chosen.contains(&(r_idx, c_idx))
                                 };
                                 let btn = ui.add_enabled(!is_target, egui::Button::new(&display).selected(is_selected));
-                                if btn.clicked() {
+                                if btn.clicked() && expr.is_some() {
+                                    if let Some(e) = expr.as_mut() {
+                                        // two references in a row need an operator between them
+                                        if e.trim_end().chars().last().is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == ')') {
+                                            e.push('+');
+                                        }
+                                        e.push_str(&coord);
+                                    }
+                                } else if btn.clicked() {
                                     if *use_above {
                                         chosen.clear();
                                         for rr in 0..target_row {
@@ -2651,10 +2716,12 @@ fn table_math_dialog(
                 });
 
             ui.add_space(6.0);
-            ui.checkbox(
-                keep_sig_figs,
-                "Keep maximum significant figures / precision from input cells (e.g. 10 + 5.23 = 15.23)",
-            );
+            if expr.is_none() {
+                ui.checkbox(
+                    keep_sig_figs,
+                    "Keep maximum significant figures / precision from input cells (e.g. 10 + 5.23 = 15.23)",
+                );
+            }
 
             ui.add_space(6.0);
             ui.separator();
@@ -2669,7 +2736,7 @@ fn table_math_dialog(
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!built_formula.is_empty(), egui::Button::new(RichText::new("  Apply Calculation  ").strong()))
+                    .add_enabled(formula_ok, egui::Button::new(RichText::new("  Apply Calculation  ").strong()))
                     .clicked()
                 {
                     apply_formula = Some(Some(built_formula.clone()));

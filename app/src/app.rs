@@ -109,7 +109,7 @@ pub enum Action {
     Shrink,
     StepFontSize(f32),
     ClearFormat,
-    Font(u8),
+    Font(u16),
     Size(f32),
     Color([u8; 3]),
     ColorGradient([u8; 3], [u8; 3]),
@@ -174,7 +174,7 @@ pub struct Config {
     pub user_corrections: Vec<(String, String)>,
     pub removed_corrections: Vec<String>,
     pub spellcheck: bool,
-    pub recent_fonts: Vec<u8>,
+    pub recent_fonts: Vec<u16>,
     pub shortcut_preset: ShortcutPreset,
 }
 
@@ -453,7 +453,7 @@ impl App {
                 return;
             }
         };
-        let text = String::from_utf8_lossy(&bytes).to_string();
+        let text = doc::decode_text(&bytes);
         let doc = match ext.as_str() {
             "wpx" => match doc::from_json(&text) {
                 Ok(d) => d,
@@ -469,7 +469,8 @@ impl App {
                     return;
                 }
             },
-            "rtf" => doc::from_rtf(&text),
+            // RTF is 7-bit with 8-bit escapes and raw \bin data: keep every byte as-is
+            "rtf" => doc::from_rtf(&bytes.iter().map(|&b| b as char).collect::<String>()),
             "md" | "markdown" => doc::from_markdown(&text),
             "docx" => match crate::docx::read(&bytes) {
                 Ok(d) => d,
@@ -1602,6 +1603,7 @@ impl App {
                         let mut use_left = r == 0 && c > 0;
                         let mut chosen = Vec::new();
                         let mut keep_sig_figs = true;
+                        let mut expr: Option<String> = None;
                         if let Some(existing) = self
                             .tab_ref()
                             .doc
@@ -1610,8 +1612,27 @@ impl App {
                             .and_then(|rw| rw.cells.get(c))
                             .and_then(|cl| cl.formula.clone())
                         {
-                            let s = existing.trim().strip_prefix('=').unwrap_or(existing.trim()).trim();
-                            if let (Some(op_i), Some(cl_i)) = (s.find('('), s.rfind(')')) {
+                            let s = existing
+                                .trim()
+                                .strip_prefix('=')
+                                .unwrap_or(existing.trim())
+                                .trim();
+                            // arithmetic formulas reopen in the arithmetic editor
+                            let first = s
+                                .split('(')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_ascii_uppercase();
+                            let aggregate = matches!(
+                                first.as_str(),
+                                "SUM" | "TOTAL" | "SUBTOTAL" | "AVERAGE" | "AVG" | "MEDIAN"
+                            ) && s.find('(').is_some()
+                                && s.ends_with(')')
+                                && s.matches('(').count() == 1;
+                            if !aggregate {
+                                expr = Some(s.to_string());
+                            } else if let (Some(op_i), Some(cl_i)) = (s.find('('), s.rfind(')')) {
                                 let op_n = s[..op_i].trim().to_ascii_uppercase();
                                 op = match op_n.as_str() {
                                     "SUBTOTAL" => TableMathOp::Subtotal,
@@ -1652,6 +1673,7 @@ impl App {
                             use_left,
                             chosen,
                             keep_sig_figs,
+                            expr,
                         };
                         refocus = false;
                     } else {
