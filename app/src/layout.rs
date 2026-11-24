@@ -705,6 +705,30 @@ fn shape_range(
     Shaped { galley, leaders }
 }
 
+/// Word-accurate natural single-line height in layout points, using `hhea` / `OS/2` metrics
+/// from the actual OpenType font face (matching Microsoft Word & WordCraft).
+fn word_natural_line_h(para: &Para, start: usize, end: usize, pt: f32, fallback: f32) -> f32 {
+    let mut best = 0.0f32;
+    let slice = if start < end && end <= para.styles.len() {
+        &para.styles[start..end]
+    } else {
+        std::slice::from_ref(&para.end_style)
+    };
+    for st in slice {
+        if let Some((a, d)) = crate::fonts::word_line_metrics(st.font, st.bold, st.italic) {
+            let h = st.size * pt * (a + d);
+            if h > best {
+                best = h;
+            }
+        }
+    }
+    if best > 0.0 {
+        best
+    } else {
+        fallback
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn shape_para_lines(
     fonts: &mut egui::epaint::text::FontsView<'_>,
@@ -943,6 +967,7 @@ fn shape_para_lines(
                 .map(|(_, l)| *l)
                 .collect();
             let is_first = row_no == 0;
+            let nat_h = word_natural_line_h(para, start, end, pt, placed.row.size.y);
             out.push(Line {
                 para: pi,
                 start,
@@ -950,7 +975,7 @@ fn shape_para_lines(
                 page: 0,
                 x: base_x + row_x + offset,
                 y: 0.0,
-                height: line_h(placed.row.size.y),
+                height: line_h(nat_h),
                 galley: single_row(galley, r, para, start, end),
                 xs,
                 first_in_para: is_first,
@@ -998,8 +1023,61 @@ pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, dr
                     y += fmt.space_before * pt;
                 }
                 let para_lines = shape_para_lines(fonts, doc, book, pi, 0.0, content_size.x, ppi, true);
-                for mut l in para_lines {
-                    if !draft && y + l.height > content_size.y && y > 0.0 {
+                let para_total_h: f32 = para_lines.iter().map(|l| l.height).sum();
+                if !draft && y > 0.0 {
+                    // keep_lines: keep all lines of this paragraph together on one page
+                    let break_keep_lines = fmt.keep_lines
+                        && y + para_total_h > content_size.y
+                        && para_total_h <= content_size.y;
+                    // keep_next: keep this paragraph with at least the first line of the next paragraph
+                    let break_keep_next = if fmt.keep_next
+                        && pi + 1 < doc.paras.len()
+                        && doc.paras[pi + 1].fmt.table_id == 0
+                        && !doc.paras[pi + 1].fmt.page_break_before
+                    {
+                        let next_lines = shape_para_lines(fonts, doc, book, pi + 1, 0.0, content_size.x, ppi, true);
+                        let next_first_h = next_lines.first().map_or(0.0, |l| l.height);
+                        let needed = para_total_h
+                            + fmt.space_after * pt
+                            + doc.paras[pi + 1].fmt.space_before * pt
+                            + next_first_h;
+                        y + needed > content_size.y && needed <= content_size.y
+                    } else {
+                        false
+                    };
+                    if break_keep_lines || break_keep_next {
+                        page += 1;
+                        y = 0.0;
+                    }
+                }
+                // Widow / orphan control (Word `w:widowControl`, Google Docs `avoidWidowAndOrphan`)
+                let mut force_break_at: Option<usize> = None;
+                if !draft && fmt.widow_control && para_lines.len() >= 2 && y > 0.0 {
+                    let mut sim_y = y;
+                    let mut fit = 0usize;
+                    for l in &para_lines {
+                        if sim_y + l.height > content_size.y {
+                            break;
+                        }
+                        sim_y += l.height;
+                        fit += 1;
+                    }
+                    if fit < para_lines.len() {
+                        if fit <= 1 && para_total_h <= content_size.y {
+                            // Prevent orphan (1 line alone at bottom of page)
+                            page += 1;
+                            y = 0.0;
+                        } else if para_lines.len() - fit == 1 && fit >= 3 {
+                            // Prevent widow (1 line alone at top of next page)
+                            force_break_at = Some(fit - 1);
+                        }
+                    }
+                }
+                for (li, mut l) in para_lines.into_iter().enumerate() {
+                    if !draft
+                        && y > 0.0
+                        && (force_break_at == Some(li) || y + l.height > content_size.y)
+                    {
                         page += 1;
                         y = 0.0;
                     }
@@ -1047,8 +1125,16 @@ pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, dr
             let avail_tbl_w = (content_size.x - tbl_indent_x).max(40.0 * zoom);
             let col_scale = if raw_tbl_w > avail_tbl_w + 1.0 { avail_tbl_w / raw_tbl_w } else { 1.0 };
 
+            // Cache leading repeating header rows (`w:tblHeader`) to re-emit on page breaks.
+            let mut header_rows: Vec<(f32, Vec<Line>, Vec<LayoutCell>)> = Vec::new();
+            let mut collecting_headers = true;
+
             for r_idx in 0..num_rows {
                 let row_spec = tbl_opt.and_then(|t| t.rows.get(r_idx));
+                let is_header_row = row_spec.is_some_and(|rs| rs.is_header);
+                if !is_header_row {
+                    collecting_headers = false;
+                }
                 let max_para_col = doc.paras[pi..tbl_end]
                     .iter()
                     .filter(|p| p.fmt.table_row as usize == r_idx)
@@ -1126,8 +1212,30 @@ pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, dr
                 if !draft && y + row_h > content_size.y && y > 0.0 {
                     page += 1;
                     y = 0.0;
+                    if !is_header_row && !header_rows.is_empty() {
+                        let hdr_total: f32 = header_rows.iter().map(|(h, _, _)| *h).sum();
+                        if hdr_total + row_h <= content_size.y {
+                            for (hh, h_lines, h_cells) in &header_rows {
+                                for hl in h_lines {
+                                    let mut c = hl.clone();
+                                    c.page = page;
+                                    c.y += y;
+                                    lines.push(c);
+                                }
+                                for hc in h_cells {
+                                    let mut c = hc.clone();
+                                    c.page = page;
+                                    c.rect = c.rect.translate(Vec2::new(0.0, y));
+                                    cells.push(c);
+                                }
+                                y += *hh;
+                            }
+                        }
+                    }
                 }
 
+                let mut row_hdr_lines = Vec::new();
+                let mut row_hdr_cells = Vec::new();
                 for sc in shaped_cells {
                     let dy = match sc.spec.v_align {
                         CellVAlign::Top => 0.0,
@@ -1135,20 +1243,34 @@ pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, dr
                         CellVAlign::Bottom => (row_h - sc.pad_b - sc.text_h - sc.pad_t).max(-sc.pad_t),
                     };
                     for mut l in sc.lines {
+                        if collecting_headers && is_header_row {
+                            let mut rel = l.clone();
+                            rel.y += dy;
+                            row_hdr_lines.push(rel);
+                        }
                         l.page = page;
                         l.y += y + dy;
                         lines.push(l);
                     }
-                    cells.push(LayoutCell {
+                    let cell_rel = LayoutCell {
                         table_id: tid,
                         row: r_idx as u16,
                         col: sc.col,
                         page,
-                        rect: Rect::from_min_size(Pos2::new(sc.x, y), Vec2::new(sc.w, row_h)),
+                        rect: Rect::from_min_size(Pos2::new(sc.x, 0.0), Vec2::new(sc.w, row_h)),
                         shading: sc.spec.shading,
                         borders: sc.spec.borders,
                         wrap_text: sc.spec.wrap_text,
-                    });
+                    };
+                    if collecting_headers && is_header_row {
+                        row_hdr_cells.push(cell_rel.clone());
+                    }
+                    let mut placed_cell = cell_rel;
+                    placed_cell.rect = placed_cell.rect.translate(Vec2::new(0.0, y));
+                    cells.push(placed_cell);
+                }
+                if collecting_headers && is_header_row {
+                    header_rows.push((row_h, row_hdr_lines, row_hdr_cells));
                 }
 
                 y += row_h;
@@ -1158,7 +1280,7 @@ pub fn build(ctx: &egui::Context, doc: &Document, book: &FontBook, zoom: f32, dr
         }
     });
 
-    lines.sort_by_key(|l| (l.para, l.start));
+    lines.sort_by_key(|l| (l.para, l.start, l.page));
     let pages = page + 1;
     let page_size = if draft { Vec2::new(page_size.x, (y + content_offset.y * 2.0).max(page_size.y)) } else { page_size };
     PageLayout { lines, cells, pages, ppi, page_size, content_offset, content_size, draft }

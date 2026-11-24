@@ -1,6 +1,6 @@
 [project]
 name = "syllabary"
-version = "1.0.0"
+version = "0.2.1"
 description = "Syllabary — fast, 100% offline desktop word processor and PDF/DOCX studio"
 readme = "README.md"
 authors = [

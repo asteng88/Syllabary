@@ -23,6 +23,7 @@ pub enum Dialog {
     Symbol,
     Prefs,
     About,
+    Update,
     Shortcuts,
     DocProps,
     SmartCorrect(String, String),
@@ -668,15 +669,176 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             }
         }
         Dialog::About => {
+            let mut close = false;
             window("About Syllabary").open(&mut open).show(ctx, |ui| {
-                ui.heading("Syllabary — Offline Studio Edition");
+                ui.heading(format!("Syllabary v{} — Offline Studio Edition", crate::updater::CURRENT_VERSION));
                 ui.label("A fast, offline desktop word processor featuring the Google Docs menu structure, Material Design 3 pill toolbar, and modern productivity tools.");
                 ui.add_space(6.0);
                 ui.label("• Search the menus (Alt+/) & @ Smart Chips / Building Blocks");
                 ui.label("• Checklists, Markdown auto-formatting, Pageless mode & Version History");
                 ui.label("• Comments, Suggesting mode, Links, Bookmarks, Citations & Live Word Count");
                 ui.label("• Works 100% offline on this computer — no cloud account or internet connection needed.");
+                ui.add_space(8.0);
+                if ui.button("Check for Updates…").clicked() {
+                    app.act(Action::CheckForUpdates);
+                    close = true;
+                }
             });
+            if close {
+                open = false;
+            }
+        }
+        Dialog::Update => {
+            let phase = app.update.phase.clone();
+            let rel = app.update.release.clone();
+            let mut close = false;
+            let mut start_dl = false;
+            let mut cancel_dl = false;
+            let mut restart_now = false;
+            let mut open_url: Option<String> = None;
+
+            window("Syllabary Update").open(&mut open).show(ctx, |ui| {
+                ui.set_min_width(460.0);
+                match phase {
+                    crate::app::UpdatePhase::Prompt => {
+                        if let Some(r) = &rel {
+                            ui.heading(format!("New Version Available: v{}", r.version));
+                            ui.label(
+                                RichText::new(format!(
+                                    "You are currently running Syllabary v{}.",
+                                    crate::updater::CURRENT_VERSION
+                                ))
+                                .weak(),
+                            );
+                            ui.add_space(8.0);
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_rgba_unmultiplied(25, 135, 84, 24))
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(25, 135, 84)))
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new("100% Data Preservation Guaranteed")
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(25, 135, 84)),
+                                    );
+                                    ui.label("Updating replaces the executable in-place on disk. Your documents, settings, and history stay untouched.");
+                                });
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("What's New in this Release:").strong());
+                            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                                let notes = if r.body.trim().is_empty() {
+                                    "No changelog provided."
+                                } else {
+                                    r.body.trim()
+                                };
+                                ui.label(notes);
+                            });
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Later").clicked() {
+                                    close = true;
+                                }
+                                if ui.button("View on GitHub").clicked() {
+                                    open_url = Some(r.html_url.clone());
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if r.asset_url.is_some()
+                                        && ui
+                                            .button(
+                                                RichText::new(format!("Download & Update to v{}", r.version))
+                                                    .strong(),
+                                            )
+                                            .clicked()
+                                    {
+                                        start_dl = true;
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    crate::app::UpdatePhase::Downloading => {
+                        let ver = rel.as_ref().map_or("latest", |r| r.version.as_str());
+                        ui.heading(format!("Downloading Syllabary v{ver}…"));
+                        let (down, tot) = app
+                            .update
+                            .progress
+                            .lock()
+                            .map(|p| *p)
+                            .unwrap_or((0, 0));
+                        let frac = if tot > 0 {
+                            (down as f32 / tot as f32).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        ui.add(egui::ProgressBar::new(frac).show_percentage().animate(true));
+                        let status = if tot > 0 {
+                            format!(
+                                "{:.1} MB / {:.1} MB",
+                                down as f64 / (1024.0 * 1024.0),
+                                tot as f64 / (1024.0 * 1024.0)
+                            )
+                        } else if down > 0 {
+                            format!("{:.1} MB downloaded", down as f64 / (1024.0 * 1024.0))
+                        } else {
+                            "Connecting to GitHub…".into()
+                        };
+                        ui.label(RichText::new(status).weak());
+                        ui.add_space(8.0);
+                        if ui.button("Cancel").clicked() {
+                            cancel_dl = true;
+                        }
+                    }
+                    crate::app::UpdatePhase::ReadyToRestart(ver) => {
+                        ui.heading(format!("Updated to Syllabary v{ver}!"));
+                        ui.label("The new executable has been installed in-place. Restart Syllabary now (or whenever you finish your document) to use the new version.");
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Later").clicked() {
+                                close = true;
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button(RichText::new("Restart Now").strong()).clicked() {
+                                    restart_now = true;
+                                }
+                            });
+                        });
+                    }
+                    crate::app::UpdatePhase::Error(msg) => {
+                        ui.heading("Update Failed");
+                        ui.label(msg);
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                            if ui.button("Open GitHub Releases").clicked() {
+                                open_url = Some(crate::updater::GITHUB_RELEASES_PAGE.to_string());
+                            }
+                        });
+                    }
+                    crate::app::UpdatePhase::Idle => {
+                        close = true;
+                    }
+                }
+            });
+
+            if close {
+                open = false;
+            }
+            if let Some(u) = open_url {
+                app.act(Action::OpenLink(u));
+            }
+            if start_dl {
+                app.start_update_download();
+            }
+            if cancel_dl {
+                app.update.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                open = false;
+            }
+            if restart_now {
+                crate::updater::relaunch_and_exit();
+            }
         }
         Dialog::Shortcuts => {
             let mut kp = app.cfg.shortcut_preset;
@@ -1096,6 +1258,7 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         (Icon::New, "Window > Next document tab", "Ctrl+Tab", Action::NextTab),
         (Icon::Close, "Window > Close all tabs", "", Action::CloseAll),
         (Icon::Shortcuts, "Help > Keyboard shortcuts", "Ctrl+/", Action::Dialog(Dialog::Shortcuts)),
+        (Icon::About, "Help > Check for Updates…", "", Action::CheckForUpdates),
         (Icon::About, "Help > About Syllabary", "", Action::Dialog(Dialog::About)),
     ];
 

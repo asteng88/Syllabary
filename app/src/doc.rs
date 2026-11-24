@@ -155,7 +155,24 @@ pub fn font_index(name: &str) -> u16 {
         }
     }
     let l = cleaned.to_ascii_lowercase();
-    match l.replace([' ', '-', '_'], "").as_str() {
+    let key = l.replace([' ', '-', '_'], "");
+    // Metric-compatible open-source font twins (matching WordCraft's font substitution table)
+    let twins: &[&str] = match key.as_str() {
+        "calibri" | "calibrilight" | "aptos" | "aptosdisplay" | "aptosnarrow" => &["Carlito", "Calibri"],
+        "cambria" | "cambriamath" => &["Caladea", "Cambria"],
+        "arial" | "arialmt" | "helvetica" | "helveticaneue" => &["Liberation Sans", "Arimo", "Arial"],
+        "times" | "timesnewroman" | "timesnewromanps" | "timesnewromanpsmt" => &["Liberation Serif", "Tinos", "Times New Roman"],
+        "courier" | "couriernew" | "couriernewpsmt" => &["Liberation Mono", "Cousine", "Courier New"],
+        "georgia" => &["Gelasio", "Georgia"],
+        "palatino" | "palatinolinotype" | "bookantiqua" => &["TeX Gyre Pagella", "Palatino Linotype"],
+        _ => &[],
+    };
+    for twin in twins {
+        if let Some(i) = cat.iter().position(|e| e.name.eq_ignore_ascii_case(twin) && e.files[0].is_some()) {
+            return i as u16;
+        }
+    }
+    match key.as_str() {
         "times" | "timesnewroman" | "timesnewromanps" | "timesnewromanpsmt" => return 0,
         "helvetica" | "helveticaneue" | "arial" | "arialmt" => return 1,
         "aptos" | "aptosdisplay" | "aptosnarrow" | "calibri" | "calibrilight" => return 2,
@@ -235,6 +252,10 @@ fn is_zero_u16(v: &u16) -> bool {
 
 fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 impl CharStyle {
@@ -891,6 +912,12 @@ pub struct TableRowSpec {
     pub min_height_pt: f32,
     #[serde(default)]
     pub grid_after: u16,
+    /// Prevent this table row from splitting across pages (`w:cantSplit`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cant_split: bool,
+    /// Repeat this row at the top of each page when a table spans pages (`w:tblHeader`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_header: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -1193,6 +1220,15 @@ pub struct ParaFmt {
     /// paragraphs with identical borders share one box, like Word.
     #[serde(default, skip_serializing_if = "CellBorders::is_empty")]
     pub pborders: CellBorders,
+    /// Keep this paragraph on the same page as the following paragraph (`w:keepNext` / `keepWithNext`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_next: bool,
+    /// Keep all lines of this paragraph together on one page (`w:keepLines` / `keepLinesTogether`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_lines: bool,
+    /// Prevent single-line widows and orphans at page breaks (`w:widowControl` / `avoidWidowAndOrphan`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub widow_control: bool,
 }
 
 impl Default for ParaFmt {
@@ -1224,6 +1260,9 @@ impl Default for ParaFmt {
             tabs: TabStops::default(),
             list_id: 0,
             pborders: CellBorders::default(),
+            keep_next: false,
+            keep_lines: false,
+            widow_control: false,
         }
     }
 }
@@ -1783,6 +1822,7 @@ impl Document {
                 cells,
                 min_height_pt: 26.0,
                 grid_after: 0,
+                ..TableRowSpec::default()
             });
         }
         self.tables.push(DocTable {
@@ -2140,6 +2180,7 @@ impl Document {
                     cells: tpl.clone(),
                     min_height_pt: 26.0,
                     grid_after: 0,
+                    ..TableRowSpec::default()
                 },
             );
             (idx, ncols, tpl)
@@ -3639,7 +3680,10 @@ pub fn to_gdoc(doc: &Document) -> String {
             "indentStart": { "magnitude": ind_left * 72.0, "unit": "PT" },
             "indentFirstLine": { "magnitude": (ind_left + ind_first) * 72.0, "unit": "PT" },
             "indentEnd": { "magnitude": p.fmt.right_in * 72.0, "unit": "PT" },
-            "pageBreakBefore": p.fmt.page_break_before
+            "pageBreakBefore": p.fmt.page_break_before,
+            "keepWithNext": p.fmt.keep_next,
+            "keepLinesTogether": p.fmt.keep_lines,
+            "avoidWidowAndOrphan": p.fmt.widow_control
         });
         if !p.fmt.tabs.is_empty() {
             pstyle["tabStops"] = serde_json::Value::Array(

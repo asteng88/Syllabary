@@ -253,6 +253,15 @@ fn apply_para_style(f: &mut ParaFmt, ps: &Value) {
     if let Some(pbb) = ps.get("pageBreakBefore").and_then(Value::as_bool) {
         f.page_break_before = pbb;
     }
+    if let Some(kn) = ps.get("keepWithNext").and_then(Value::as_bool) {
+        f.keep_next = kn;
+    }
+    if let Some(kl) = ps.get("keepLinesTogether").and_then(Value::as_bool) {
+        f.keep_lines = kl;
+    }
+    if let Some(wc) = ps.get("avoidWidowAndOrphan").and_then(Value::as_bool) {
+        f.widow_control = wc;
+    }
     if let Some(shd) = ps.get("shading").and_then(|s| s.get("backgroundColor")) {
         f.shading = rgb(Some(shd)).filter(|c| *c != [255, 255, 255]);
     }
@@ -710,14 +719,16 @@ fn read_table(doc: &mut Document, ctx: &mut Ctx, t: &Value) {
                 ));
             }
         }
-        let min_h = row
-            .get("tableRowStyle")
-            .and_then(|s| mag(s.get("minRowHeight")))
-            .unwrap_or(0.0);
+        let trs = row.get("tableRowStyle");
+        let min_h = trs.and_then(|s| mag(s.get("minRowHeight"))).unwrap_or(0.0);
+        let is_header = trs.and_then(|s| s.get("tableHeader")).and_then(Value::as_bool).unwrap_or(false);
+        let cant_split = trs.and_then(|s| s.get("preventOverflow")).and_then(Value::as_bool).unwrap_or(false);
         rows.push(TableRowSpec {
             cells,
             min_height_pt: min_h,
             grid_after: 0,
+            cant_split,
+            is_header,
         });
     }
     doc.tables.push(DocTable {

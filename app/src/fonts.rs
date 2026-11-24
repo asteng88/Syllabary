@@ -59,18 +59,139 @@ pub struct CatalogEntry {
     pub cat: FontCat,
     pub files: [Option<PathBuf>; 4],
     data: [OnceLock<Option<Arc<FontData>>>; 4],
+    raw: [OnceLock<Option<Arc<Vec<u8>>>>; 4],
+    metrics: [OnceLock<Option<(f32, f32)>>; 4],
 }
 
 impl CatalogEntry {
-    fn load_face(&self, v: usize) -> Option<Arc<FontData>> {
-        self.data[v]
+    fn load_raw(&self, v: usize) -> Option<Arc<Vec<u8>>> {
+        self.raw[v]
             .get_or_init(|| {
                 let path = self.files[v].as_ref()?;
                 let bytes = std::fs::read(path).ok()?;
-                Some(Arc::new(FontData::from_owned(strip_ebdt(bytes))))
+                Some(Arc::new(bytes))
             })
             .clone()
     }
+
+    fn load_face(&self, v: usize) -> Option<Arc<FontData>> {
+        self.data[v]
+            .get_or_init(|| {
+                let raw = self.load_raw(v)?;
+                Some(Arc::new(FontData::from_owned(strip_ebdt((*raw).clone()))))
+            })
+            .clone()
+    }
+
+    fn load_word_metrics(&self, v: usize) -> Option<(f32, f32)> {
+        *self.metrics[v].get_or_init(|| {
+            let raw = self.load_raw(v)?;
+            parse_word_line_metrics(&raw)
+        })
+    }
+}
+
+/// Parses Word-accurate single-line vertical metrics `(ascent_em, descent_em)` from raw
+/// TrueType / OpenType / TTC font bytes, following Microsoft Word & WordCraft's rule:
+/// `hhea` `(ascender + lineGap, |descender|)` with `lineGap` placed above ascent, falling
+/// back to `OS/2` `(usWinAscent, usWinDescent)` when `hhea` is missing or out of range.
+pub fn parse_word_line_metrics(data: &[u8]) -> Option<(f32, f32)> {
+    let dir_off = if data.starts_with(b"ttcf") && data.len() >= 16 {
+        u32_be(data, 12) as usize
+    } else if data.len() >= 12 && matches!(&data[0..4], [0, 1, 0, 0] | b"OTTO" | b"true") {
+        0
+    } else {
+        return None;
+    };
+    if dir_off + 12 > data.len() {
+        return None;
+    }
+    let num_tables = u16_be(data, dir_off + 4) as usize;
+    if num_tables == 0 || num_tables > 256 || dir_off + 12 + num_tables * 16 > data.len() {
+        return None;
+    }
+    let mut head_loc = (0usize, 0usize);
+    let mut hhea_loc = (0usize, 0usize);
+    let mut os2_loc = (0usize, 0usize);
+    for i in 0..num_tables {
+        let r = dir_off + 12 + i * 16;
+        let tag = &data[r..r + 4];
+        let off = u32_be(data, r + 8) as usize;
+        let len = u32_be(data, r + 12) as usize;
+        if off.checked_add(len).is_none_or(|end| end > data.len()) {
+            continue;
+        }
+        match tag {
+            b"head" => head_loc = (off, len),
+            b"hhea" => hhea_loc = (off, len),
+            b"OS/2" => os2_loc = (off, len),
+            _ => {}
+        }
+    }
+    if head_loc.1 < 20 {
+        return None;
+    }
+    let upem = u16_be(data, head_loc.0 + 18) as f32;
+    if upem <= 0.0 {
+        return None;
+    }
+    let ok = |a: f32, d: f32| a > 0.0 && a + d <= upem * 2.0;
+    if hhea_loc.1 >= 10 {
+        let asc = (i16_be(data, hhea_loc.0 + 4) as f32).max(0.0);
+        let desc = (-(i16_be(data, hhea_loc.0 + 6) as f32)).max(0.0);
+        let gap = (i16_be(data, hhea_loc.0 + 8) as f32).max(0.0);
+        let a = asc + gap;
+        if ok(a, desc) {
+            return Some((a / upem, desc / upem));
+        }
+    }
+    if os2_loc.1 >= 78 {
+        let a = u16_be(data, os2_loc.0 + 74) as f32;
+        let d = u16_be(data, os2_loc.0 + 76) as f32;
+        if ok(a, d) {
+            return Some((a / upem, d / upem));
+        }
+    }
+    None
+}
+
+/// Returns Word-accurate `(ascent_em, descent_em)` line metrics for `(font, bold, italic)`,
+/// falling back to regular face if the requested variant is unavailable.
+pub fn word_line_metrics(font: u16, bold: bool, italic: bool) -> Option<(f32, f32)> {
+    let entry = catalog().get(font as usize)?;
+    let v = (bold as usize) | ((italic as usize) << 1);
+    entry
+        .load_word_metrics(v)
+        .or_else(|| if italic { entry.load_word_metrics(bold as usize) } else { None })
+        .or_else(|| entry.load_word_metrics(0))
+}
+
+/// Returns the raw TTF/OTF/TTC font bytes for `(font, bold, italic)` along with `(synth_bold, synth_italic)`.
+/// Used by the vector PDF exporter (`krilla`) to embed real subsetted font faces.
+pub fn font_file_bytes(font: u16, bold: bool, italic: bool) -> Option<(Arc<Vec<u8>>, bool, bool)> {
+    let cat = catalog();
+    let entry = cat.get(font as usize).or_else(|| cat.get(DEFAULT_FONT as usize))?;
+    let v = (bold as usize) | ((italic as usize) << 1);
+    if let Some(b) = entry.load_raw(v) {
+        return Some((b, false, false));
+    }
+    if italic {
+        if let Some(b) = entry.load_raw(bold as usize) {
+            return Some((b, false, true));
+        }
+    }
+    if bold {
+        if let Some(b) = entry.load_raw((italic as usize) << 1) {
+            return Some((b, true, false));
+        }
+    }
+    if let Some(b) = entry.load_raw(0) {
+        return Some((b, bold, italic));
+    }
+    if font != DEFAULT_FONT {
+        return font_file_bytes(DEFAULT_FONT, bold, italic);
+    }
+    None
 }
 
 fn font_dir() -> PathBuf {
@@ -528,6 +649,8 @@ pub fn catalog() -> &'static [CatalogEntry] {
                 cat: base_font_category(fi as u16),
                 files,
                 data: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+                raw: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+                metrics: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
             });
         }
 
@@ -579,6 +702,8 @@ pub fn catalog() -> &'static [CatalogEntry] {
                 cat: d.cat,
                 files: d.files,
                 data: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+                raw: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+                metrics: [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
             });
         }
 
@@ -782,5 +907,14 @@ mod tests {
     fn system_fonts_discovered() {
         let cat = catalog();
         assert!(cat.len() > FONT_NAMES.len(), "Expected system fonts beyond the 31 base fonts, got {}", cat.len());
+    }
+
+    #[test]
+    fn word_hhea_line_metrics_are_in_typographic_range() {
+        let m = word_line_metrics(DEFAULT_FONT, false, false).expect("default font has OpenType hhea/OS/2 metrics");
+        let total = m.0 + m.1;
+        assert!((1.0..=1.5).contains(&total), "unexpected Word single-line em ratio: {m:?} (sum={total})");
+        let (bytes, _, _) = font_file_bytes(DEFAULT_FONT, false, false).expect("default font bytes readable");
+        assert!(bytes.len() > 1024);
     }
 }

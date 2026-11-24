@@ -299,20 +299,15 @@ pub fn to_markdown(doc: &Document) -> String {
     out
 }
 
-// ───────────────────────── reader ─────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
-enum Block {
-    Para,
-    Heading(usize),
-    Quote,
-    Item(ListKind, u8, bool, u32),
-}
+// ───────────────────────── reader (pulldown-cmark CommonMark + GFM) ─────────────────────────
 
-fn heading_style(level: usize) -> usize {
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+fn heading_style(level: HeadingLevel) -> usize {
     match level {
-        1 => 4,
-        2 => 5,
+        HeadingLevel::H1 => 4,
+        HeadingLevel::H2 => 5,
         _ => 6,
     }
 }
@@ -320,365 +315,43 @@ fn heading_style(level: usize) -> usize {
 /// Paragraph spacing that matches how Markdown is usually rendered.
 const MD_GAP: f32 = 8.0;
 
-pub fn from_markdown(src: &str) -> Document {
-    let mut doc = Document {
-        paras: Vec::new(),
-        ..Default::default()
-    };
-    let styles = named_styles();
-    let normalized = src.replace("\r\n", "\n").replace('\r', "\n");
-    let lines: Vec<&str> = normalized.split('\n').collect();
-    let base = CharStyle::default();
-    let mut li = 0usize;
-    // the open paragraph-like block: (kind, collected text lines)
-    let mut open: Option<(Block, Vec<String>)> = None;
-    let mut list_starts: Vec<(u8, u32)> = Vec::new();
-    let mut list_cols: Vec<usize> = Vec::new();
-
-    let flush = |doc: &mut Document,
-                 open: &mut Option<(Block, Vec<String>)>,
-                 list_starts: &mut Vec<(u8, u32)>| {
-        let Some((kind, ls)) = open.take() else {
-            return;
-        };
-        // join lines: soft wraps become spaces, hard breaks ("  " or "\\" endings) become line breaks
-        let mut text = String::new();
-        for (k, l) in ls.iter().enumerate() {
-            let hard = l.ends_with("  ") || l.ends_with('\\');
-            let t = if l.ends_with('\\') {
-                &l[..l.len() - 1]
-            } else {
-                l.trim_end()
-            };
-            text.push_str(t.trim_start());
-            if k + 1 < ls.len() {
-                text.push(if hard { '\n' } else { ' ' });
-            }
-        }
-        let (fmt, chr) = match kind {
-            Block::Para => (
-                ParaFmt {
-                    space_after: MD_GAP,
-                    ..ParaFmt::default()
-                },
-                base,
-            ),
-            Block::Heading(l) => {
-                let i = heading_style(l);
-                (
-                    ParaFmt {
-                        style: i,
-                        ..styles[i].fmt
-                    },
-                    styles[i].chr,
-                )
-            }
-            Block::Quote => (
-                ParaFmt {
-                    style: 7,
-                    ..styles[7].fmt
-                },
-                styles[7].chr,
-            ),
-            Block::Item(k, lvl, checked, start) => {
-                let mut f = ParaFmt {
-                    list: k,
-                    indent: lvl,
-                    checked,
-                    ..ParaFmt::default()
-                };
-                // a later item of the same list keeps the list's numbering
-                let prev_same = doc
-                    .paras
-                    .iter()
-                    .rev()
-                    .take_while(|q| q.fmt.list != ListKind::None && q.fmt.indent >= lvl)
-                    .find(|q| q.fmt.indent == lvl)
-                    .map(|q| (q.fmt.list, q.fmt.list_id));
-                if let Some((ListKind::Number, lid)) = prev_same {
-                    if k == ListKind::Number {
-                        f.list_id = lid;
-                    }
-                } else if k == ListKind::Number && start != 1 {
-                    // ordered lists that start elsewhere keep their first number
-                    let def_id = doc.list_defs.len() as u16 + 1;
-                    if !list_starts.iter().any(|(l, s)| *l == lvl && *s == start) {
-                        let levels = (0..9)
-                            .map(|n| ListLevel {
-                                fmt: NumFmt::Decimal,
-                                text: format!("%{}.", n + 1),
-                                start: if n == lvl as usize { start } else { 1 },
-                                left_in: n as f32 * 0.5 + 0.25,
-                                first_in: -0.25,
-                                ..ListLevel::default()
-                            })
-                            .collect();
-                        doc.list_defs.push(ListDef { id: def_id, levels });
-                        list_starts.push((lvl, start));
-                    }
-                    f.list_id = doc.list_defs.len() as u16;
-                }
-                (f, base)
-            }
-        };
-        let mut p = Para::new(chr, fmt);
-        let imgs_before = doc.images.len();
-        parse_inline(doc, &mut p, &text, chr);
-        let new_imgs: Vec<u64> = doc.images[imgs_before..].iter().map(|i| i.id).collect();
-        if new_imgs.is_empty() {
-            doc.paras.push(p);
-            return;
-        }
-        // images are blocks: drop the placeholders and put each image in its own paragraph
-        let keep: Vec<usize> = (0..p.text.len())
-            .filter(|&i| p.text[i] != '\u{FFFC}')
-            .collect();
-        p.text = keep.iter().map(|&i| p.text[i]).collect();
-        p.styles = keep.iter().map(|&i| p.styles[i]).collect();
-        let only_images = p.text.iter().all(|c| c.is_whitespace());
-        if !only_images {
-            doc.paras.push(p.clone());
-        }
-        for id in new_imgs {
-            let mut ip = Para::new(
-                chr,
-                ParaFmt {
-                    space_after: MD_GAP,
-                    ..ParaFmt::default()
-                },
-            );
-            ip.fmt.image_id = id;
-            doc.paras.push(ip);
-        }
-    };
-
-    while li < lines.len() {
-        let raw = lines[li];
-        let line = raw.trim_end_matches('\n');
-        let trimmed = line.trim();
-        let lead = line
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .map(|c| if c == '\t' { 4 } else { 1 })
-            .sum::<usize>();
-
-        // blank line
-        if trimmed.is_empty() {
-            flush(&mut doc, &mut open, &mut list_starts);
-            li += 1;
-            continue;
-        }
-        // fenced code block
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            flush(&mut doc, &mut open, &mut list_starts);
-            let fence = &trimmed[..3];
-            li += 1;
-            let mut code: Vec<&str> = Vec::new();
-            while li < lines.len() && !lines[li].trim_start().starts_with(fence) {
-                code.push(lines[li]);
-                li += 1;
-            }
-            li += 1;
-            push_code_block(&mut doc, &code);
-            continue;
-        }
-        // indented code (not continuing a paragraph or list)
-        if lead >= 4
-            && open.is_none()
-            && !matches!(
-                doc.paras.last().map(|p| p.fmt.list),
-                Some(ListKind::Bullet | ListKind::Number | ListKind::Checklist)
-            )
-        {
-            let mut code: Vec<&str> = Vec::new();
-            while li < lines.len()
-                && (lines[li].starts_with("    ")
-                    || lines[li].starts_with('\t')
-                    || lines[li].trim().is_empty())
-            {
-                let l = lines[li];
-                code.push(
-                    l.strip_prefix("    ")
-                        .or_else(|| l.strip_prefix('\t'))
-                        .unwrap_or(""),
-                );
-                li += 1;
-            }
-            while code.last().is_some_and(|l| l.trim().is_empty()) {
-                code.pop();
-            }
-            push_code_block(&mut doc, &code);
-            continue;
-        }
-        // thematic break
-        let compact: String = trimmed.chars().filter(|c| *c != ' ').collect();
-        if compact.len() >= 3
-            && (compact.chars().all(|c| c == '-')
-                || compact.chars().all(|c| c == '*')
-                || compact.chars().all(|c| c == '_'))
-        {
-            // "---" right under paragraph text is a setext heading
-            if compact.starts_with('-')
-                && matches!(open, Some((Block::Para, _)))
-                && !trimmed.contains(' ')
-            {
-                if let Some((_, ls)) = open.take() {
-                    open = Some((Block::Heading(2), ls));
-                }
-                flush(&mut doc, &mut open, &mut list_starts);
-                li += 1;
-                continue;
-            }
-            flush(&mut doc, &mut open, &mut list_starts);
-            let mut p = Para::new(
-                base,
-                ParaFmt {
-                    space_after: MD_GAP,
-                    ..ParaFmt::default()
-                },
-            );
-            p.fmt.hr = true;
-            doc.paras.push(p);
-            li += 1;
-            continue;
-        }
-        // setext H1
-        if compact.len() >= 2
-            && compact.chars().all(|c| c == '=')
-            && matches!(open, Some((Block::Para, _)))
-        {
-            if let Some((_, ls)) = open.take() {
-                open = Some((Block::Heading(1), ls));
-            }
-            flush(&mut doc, &mut open, &mut list_starts);
-            li += 1;
-            continue;
-        }
-        // ATX heading
-        if lead < 4 && trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            let rest = &trimmed[level..];
-            if (1..=6).contains(&level) && (rest.is_empty() || rest.starts_with(' ')) {
-                flush(&mut doc, &mut open, &mut list_starts);
-                let text = rest.trim().trim_end_matches('#').trim_end().to_string();
-                open = Some((Block::Heading(level), vec![text]));
-                flush(&mut doc, &mut open, &mut list_starts);
-                li += 1;
-                continue;
-            }
-        }
-        // GFM table
-        if trimmed.starts_with('|') && li + 1 < lines.len() && is_table_sep(lines[li + 1].trim()) {
-            flush(&mut doc, &mut open, &mut list_starts);
-            let header = split_row(trimmed);
-            let aligns: Vec<Align> = split_row(lines[li + 1].trim())
-                .iter()
-                .map(|c| {
-                    let c = c.trim();
-                    match (c.starts_with(':'), c.ends_with(':')) {
-                        (true, true) => Align::Center,
-                        (false, true) => Align::Right,
-                        _ => Align::Left,
-                    }
-                })
-                .collect();
-            li += 2;
-            let mut rows = vec![header];
-            while li < lines.len() && lines[li].trim().starts_with('|') {
-                rows.push(split_row(lines[li].trim()));
-                li += 1;
-            }
-            push_table(&mut doc, &rows, &aligns);
-            continue;
-        }
-        // block quote
-        if lead < 4 && trimmed.starts_with('>') {
-            let text = trimmed.trim_start_matches('>').trim_start_matches(' ');
-            match open.as_mut() {
-                Some((Block::Quote, ls)) => {
-                    if text.is_empty() {
-                        flush(&mut doc, &mut open, &mut list_starts);
-                    } else {
-                        ls.push(text.to_string());
-                    }
-                }
-                _ => {
-                    flush(&mut doc, &mut open, &mut list_starts);
-                    if !text.is_empty() {
-                        open = Some((Block::Quote, vec![text.to_string()]));
-                    }
-                }
-            }
-            li += 1;
-            continue;
-        }
-        // list item
-        if let Some((kind, checked, start, content)) = list_item(trimmed) {
-            if !(matches!(open, Some((Block::Para, _))) && kind == ListKind::Number && start != 1) {
-                flush(&mut doc, &mut open, &mut list_starts);
-                // nesting follows the indentation columns of the enclosing items
-                while list_cols.last().is_some_and(|&c| c > lead) {
-                    list_cols.pop();
-                }
-                if list_cols.last() != Some(&lead) {
-                    list_cols.push(lead);
-                }
-                let lvl = (list_cols.len() - 1).min(8) as u8;
-                open = Some((
-                    Block::Item(kind, lvl, checked, start),
-                    vec![content.to_string()],
-                ));
-                li += 1;
-                continue;
-            }
-        }
-        // paragraph text (or a lazy continuation of the open block)
-        if lead == 0 && !matches!(open, Some((Block::Item(..), _))) {
-            list_cols.clear();
-        }
-        match open.as_mut() {
-            Some((kind, ls)) if !matches!(kind, Block::Heading(_)) => {
-                ls.push(line.trim_start().to_string())
-            }
-            _ => {
-                flush(&mut doc, &mut open, &mut list_starts);
-                open = Some((Block::Para, vec![line.trim_start().to_string()]));
-            }
-        }
-        li += 1;
-    }
-    flush(&mut doc, &mut open, &mut list_starts);
-    // tight lists: no gap between items of the same list
-    for i in 0..doc.paras.len() {
-        if doc.paras[i].fmt.list != ListKind::None {
-            let next_list = doc
-                .paras
-                .get(i + 1)
-                .is_some_and(|q| q.fmt.list != ListKind::None);
-            doc.paras[i].fmt.space_after = if next_list { 0.0 } else { MD_GAP };
-        }
-    }
-    // "&nbsp;" paragraphs written for empty paragraphs
-    for p in doc.paras.iter_mut() {
-        if p.text.len() == 1 && p.text[0] == '\u{a0}' {
-            p.text.clear();
-            p.styles.clear();
-        }
-    }
-    if doc.paras.is_empty() {
-        doc.paras.push(Para::new(base, ParaFmt::default()));
-    }
-    doc
+#[derive(Clone)]
+struct ListState {
+    kind: ListKind,
+    list_id: u16,
 }
 
-fn push_code_block(doc: &mut Document, code: &[&str]) {
+#[derive(Default)]
+struct TableBuilder {
+    aligns: Vec<Align>,
+    rows: Vec<Vec<Vec<(char, CharStyle)>>>,
+    cur_row: Vec<Vec<(char, CharStyle)>>,
+    cur_cell: Vec<(char, CharStyle)>,
+    in_head: bool,
+    in_cell: bool,
+}
+
+fn push_styled_str(target_text: &mut Vec<char>, target_styles: &mut Vec<CharStyle>, s: &str, st: CharStyle) {
+    for c in s.chars() {
+        target_text.push(c);
+        target_styles.push(st);
+    }
+}
+
+fn push_code_block(doc: &mut Document, code: &str) {
     let st = CharStyle {
         font: code_font(),
         size: 10.0,
         ..CharStyle::default()
     };
-    let n = code.len().max(1);
-    for (k, l) in code.iter().enumerate() {
+    let trimmed = code.strip_suffix('\n').unwrap_or(code);
+    let lines: Vec<&str> = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        trimmed.split('\n').collect()
+    };
+    let n = lines.len().max(1);
+    for (k, l) in lines.iter().enumerate() {
         let mut p = Para::new(
             st,
             ParaFmt {
@@ -688,13 +361,10 @@ fn push_code_block(doc: &mut Document, code: &[&str]) {
                 ..ParaFmt::default()
             },
         );
-        for c in l.chars() {
-            p.text.push(c);
-            p.styles.push(st);
-        }
+        push_styled_str(&mut p.text, &mut p.styles, l, st);
         doc.paras.push(p);
     }
-    if code.is_empty() {
+    if lines.is_empty() {
         doc.paras.push(Para::new(
             st,
             ParaFmt {
@@ -707,137 +377,10 @@ fn push_code_block(doc: &mut Document, code: &[&str]) {
     }
 }
 
-fn is_table_sep(l: &str) -> bool {
-    let l = l.trim();
-    l.contains('-') && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-}
-
-fn split_row(l: &str) -> Vec<String> {
-    let inner = l.trim().trim_start_matches('|');
-    let inner = inner.strip_suffix('|').unwrap_or(inner);
-    let mut cells = Vec::new();
-    let mut cur = String::new();
-    let mut esc = false;
-    for c in inner.chars() {
-        if esc {
-            if c != '|' {
-                cur.push('\\');
-            }
-            cur.push(c);
-            esc = false;
-        } else if c == '\\' {
-            esc = true;
-        } else if c == '|' {
-            cells.push(cur.trim().to_string());
-            cur.clear();
-        } else {
-            cur.push(c);
-        }
-    }
-    cells.push(cur.trim().to_string());
-    cells
-}
-
-fn push_table(doc: &mut Document, rows: &[Vec<String>], aligns: &[Align]) {
-    let ncols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
-    let avail = (doc.page.width - doc.page.margin_left - doc.page.margin_right).max(2.0);
-    let col_w = avail / ncols as f32;
-    let tid = doc.next_table_id();
-    let mut specs = Vec::new();
-    for (r, row) in rows.iter().enumerate() {
-        let mut cells = Vec::new();
-        for c in 0..ncols {
-            cells.push(TableCellSpec {
-                width_in: col_w,
-                grid_span: 1,
-                shading: if r == 0 { Some([243, 244, 246]) } else { None },
-                borders: CellBorders::all(BorderSpec {
-                    width_pt: 0.75,
-                    color: [208, 215, 222],
-                }),
-                v_align: CellVAlign::Top,
-                pad_left_in: 0.08,
-                pad_right_in: 0.08,
-                pad_top_in: 0.04,
-                pad_bottom_in: 0.04,
-                formula: None,
-                wrap_text: true,
-            });
-            let raw = row.get(c).map_or("", String::as_str);
-            for part in raw.split("<br>") {
-                let st = CharStyle {
-                    bold: r == 0,
-                    ..CharStyle::default()
-                };
-                let fmt = ParaFmt {
-                    table_id: tid,
-                    table_row: r as u16,
-                    table_col: c as u16,
-                    align: aligns.get(c).copied().unwrap_or(Align::Left),
-                    ..ParaFmt::default()
-                };
-                let mut p = Para::new(st, fmt);
-                parse_inline(doc, &mut p, part, st);
-                doc.paras.push(p);
-            }
-        }
-        specs.push(TableRowSpec {
-            cells,
-            min_height_pt: 0.0,
-            grid_after: 0,
-        });
-    }
-    doc.tables.push(DocTable {
-        id: tid,
-        grid_cols_in: vec![col_w; ncols],
-        rows: specs,
-        indent_in: 0.0,
-    });
-    if let Some(last) = doc.paras.last_mut() {
-        last.fmt.space_after = 0.0;
-    }
-    // spacing after the table comes from an empty separator paragraph only if text follows
-}
-
-/// `- item`, `* item`, `+ item`, `1. item`, `1) item`, `- [ ] task` → (kind, checked, start, content)
-fn list_item(t: &str) -> Option<(ListKind, bool, u32, &str)> {
-    for m in ["- ", "* ", "+ "] {
-        if let Some(rest) = t.strip_prefix(m) {
-            if let Some(r) = rest.strip_prefix("[ ] ") {
-                return Some((ListKind::Checklist, false, 1, r));
-            }
-            if let Some(r) = rest
-                .strip_prefix("[x] ")
-                .or_else(|| rest.strip_prefix("[X] "))
-            {
-                return Some((ListKind::Checklist, true, 1, r));
-            }
-            return Some((ListKind::Bullet, false, 1, rest));
-        }
-    }
-    if t == "-" || t == "*" || t == "+" {
-        return Some((ListKind::Bullet, false, 1, ""));
-    }
-    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
-    if (1..=9).contains(&digits) {
-        let rest = &t[digits..];
-        if let Some(r) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
-            return Some((ListKind::Number, false, t[..digits].parse().unwrap_or(1), r));
-        }
-    }
-    None
-}
-
-fn add_image(doc: &mut Document, alt: &str, src: &str) -> bool {
-    let Some(b64) = src.split_once("base64,").map(|(_, b)| b.trim().to_string()) else {
-        return false;
-    };
-    let Some(bytes) = base64_decode(&b64) else {
-        return false;
-    };
-    let Ok(img) = image::load_from_memory(&bytes) else {
-        return false;
-    };
+fn add_image(doc: &mut Document, alt: &str, src: &str) -> Option<u64> {
+    let b64 = src.split_once("base64,").map(|(_, b)| b.trim().to_string())?;
+    let bytes = base64_decode(&b64)?;
+    let img = image::load_from_memory(&bytes).ok()?;
     let id = doc.images.iter().map(|i| i.id).max().unwrap_or(0) + 1;
     let (w, h) = (img.width().max(1), img.height().max(1));
     let max_w = (doc.page.width - doc.page.margin_left - doc.page.margin_right).max(1.0);
@@ -856,260 +399,600 @@ fn add_image(doc: &mut Document, alt: &str, src: &str) -> bool {
         png_b64: b64,
         seamless: false,
     });
-    true
+    Some(id)
 }
 
-fn find_closing(text: &str, from: usize, delim: &str) -> Option<usize> {
-    let mut i = from;
-    while let Some(off) = text[i..].find(delim) {
-        let at = i + off;
-        if at > from && !text[..at].ends_with('\\') {
-            return Some(at);
-        }
-        i = at + delim.len();
-        if i >= text.len() {
-            break;
-        }
+fn flush_table(doc: &mut Document, tb: TableBuilder) {
+    if tb.rows.is_empty() {
+        return;
     }
-    None
-}
-
-fn parse_inline(doc: &mut Document, p: &mut Para, text: &str, base: CharStyle) {
-    let push = |p: &mut Para, s: &str, st: CharStyle| {
-        for ch in s.chars() {
-            p.text.push(ch);
-            p.styles.push(st);
-        }
-        p.end_style = st;
+    let ncols = tb
+        .rows
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1)
+        .max(tb.aligns.len())
+        .max(1);
+    let tid = doc.tables.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+    let avail = (doc.page.width - doc.page.margin_left - doc.page.margin_right).max(1.0);
+    let col_w = avail / ncols as f32;
+    let border = BorderSpec {
+        width_pt: 0.5,
+        color: [203, 213, 225],
     };
-    let mut i = 0usize;
-    while i < text.len() {
-        let rest = &text[i..];
-        // backslash escape
-        if let Some(r) = rest.strip_prefix('\\') {
-            if let Some(c) = r.chars().next() {
-                if c.is_ascii_punctuation() {
-                    push(p, &c.to_string(), base);
-                    i += 1 + c.len_utf8();
-                    continue;
-                }
-            }
-        }
-        // code span
-        if rest.starts_with('`') {
-            let ticks = rest.chars().take_while(|c| *c == '`').count();
-            let fence = "`".repeat(ticks);
-            if let Some(end) = rest[ticks..].find(&fence) {
-                let raw_code = &rest[ticks..ticks + end];
-                let code = if raw_code.len() >= 2
-                    && raw_code.starts_with(' ')
-                    && raw_code.ends_with(' ')
-                    && !raw_code.trim().is_empty()
-                {
-                    &raw_code[1..raw_code.len() - 1]
-                } else {
-                    raw_code
-                };
-                let st = CharStyle {
-                    font: code_font(),
-                    size: (base.size - 1.0).max(8.0),
-                    highlight: Some(CODE_BG),
-                    ..base
-                };
-                push(p, code, st);
-                i += ticks * 2 + end;
-                continue;
-            }
-        }
-        // image ![alt](src)
-        if rest.starts_with("![") {
-            if let Some(cb) = rest.find("](") {
-                if let Some(cp) = rest[cb + 2..].find(')') {
-                    let alt = &rest[2..cb];
-                    let src = rest[cb + 2..cb + 2 + cp]
-                        .trim()
-                        .trim_matches('<')
-                        .trim_matches('>');
-                    if add_image(doc, alt, src) {
-                        push(p, "\u{FFFC}", base);
-                    } else {
-                        push(
-                            p,
-                            alt,
-                            CharStyle {
-                                italic: true,
-                                ..base
-                            },
-                        );
-                    }
-                    i += cb + 3 + cp;
-                    continue;
-                }
-            }
-        }
-        // link [label](url)
-        if rest.starts_with('[') {
-            if let Some(cb) = find_closing(rest, 1, "](") {
-                if let Some(cp) = rest[cb + 2..].find(')') {
-                    let label = &rest[1..cb];
-                    let url = rest[cb + 2..cb + 2 + cp]
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .trim_matches('<')
-                        .trim_matches('>');
-                    let lid = doc.add_link(url);
-                    let st = CharStyle { link: lid, ..base };
-                    parse_inline(doc, p, label, st);
-                    i += cb + 3 + cp;
-                    continue;
-                }
-            }
-        }
-        // autolink <https://…>
-        if rest.starts_with("<http://")
-            || rest.starts_with("<https://")
-            || rest.starts_with("<mailto:")
-        {
-            if let Some(end) = rest.find('>') {
-                let url = &rest[1..end];
-                let lid = doc.add_link(url);
-                push(p, url, CharStyle { link: lid, ..base });
-                i += end + 1;
-                continue;
-            }
-        }
-        // inline HTML the writer produces
-        let tags: [(&str, &str, fn(CharStyle) -> CharStyle); 7] = [
-            ("<u>", "</u>", |s| CharStyle {
-                underline: true,
-                ..s
-            }),
-            ("<sup>", "</sup>", |s| CharStyle { script: 1, ..s }),
-            ("<sub>", "</sub>", |s| CharStyle { script: -1, ..s }),
-            ("<mark>", "</mark>", |s| CharStyle {
-                highlight: Some([255, 240, 138]),
-                ..s
-            }),
-            ("<b>", "</b>", |s| CharStyle { bold: true, ..s }),
-            ("<i>", "</i>", |s| CharStyle { italic: true, ..s }),
-            ("<s>", "</s>", |s| CharStyle { strike: true, ..s }),
-        ];
-        let mut matched = false;
-        for (open, close, f) in tags {
-            if rest.starts_with(open) {
-                if let Some(end) = rest.find(close) {
-                    parse_inline(doc, p, &rest[open.len()..end], f(base));
-                    i += end + close.len();
-                    matched = true;
-                    break;
-                }
-            }
-        }
-        if matched {
-            continue;
-        }
-        if rest.starts_with("<br>") || rest.starts_with("<br/>") || rest.starts_with("<br />") {
-            push(p, "\n", base);
-            i += rest.find('>').unwrap_or(3) + 1;
-            continue;
-        }
-        if let Some(r) = rest.strip_prefix("&nbsp;") {
-            let _ = r;
-            push(p, "\u{a0}", base);
-            i += 6;
-            continue;
-        }
-        if let Some(num) = rest.strip_prefix("&#") {
-            if let Some(end) = num.find(';').filter(|&e| e <= 7) {
-                let code = if let Some(h) = num[..end].strip_prefix(['x', 'X']) {
-                    u32::from_str_radix(h, 16).ok()
-                } else {
-                    num[..end].parse().ok()
-                };
-                if let Some(c) = code.and_then(char::from_u32) {
-                    push(p, &c.to_string(), base);
-                    i += 2 + end + 1;
-                    continue;
-                }
-            }
-        }
-        if rest.starts_with("&amp;")
-            || rest.starts_with("&lt;")
-            || rest.starts_with("&gt;")
-            || rest.starts_with("&quot;")
-        {
-            let end = rest.find(';').unwrap_or(0);
-            let c = match &rest[..=end] {
-                "&amp;" => "&",
-                "&lt;" => "<",
-                "&gt;" => ">",
-                _ => "\"",
+    let mut specs = Vec::with_capacity(tb.rows.len());
+    for (r, row) in tb.rows.into_iter().enumerate() {
+        let mut cells = Vec::with_capacity(ncols);
+        for c in 0..ncols {
+            cells.push(TableCellSpec {
+                width_in: col_w,
+                shading: (r == 0).then_some([248, 250, 252]),
+                borders: CellBorders::all(border),
+                pad_left_in: 0.08,
+                pad_right_in: 0.08,
+                pad_top_in: 0.04,
+                pad_bottom_in: 0.04,
+                ..TableCellSpec::default()
+            });
+            let cell_chars = row.get(c).cloned().unwrap_or_default();
+            let base = CharStyle {
+                bold: r == 0,
+                ..CharStyle::default()
             };
-            push(p, c, base);
-            i += end + 1;
-            continue;
-        }
-        // emphasis: ***, **, __, ~~, *, _
-        let mut handled = false;
-        for (delim, f) in [
-            (
-                "***",
-                (|s: CharStyle| CharStyle {
-                    bold: true,
-                    italic: true,
-                    ..s
-                }) as fn(CharStyle) -> CharStyle,
-            ),
-            ("___", |s| CharStyle {
-                bold: true,
-                italic: true,
-                ..s
-            }),
-            ("**", |s| CharStyle { bold: true, ..s }),
-            ("__", |s| CharStyle { bold: true, ..s }),
-            ("~~", |s| CharStyle { strike: true, ..s }),
-            ("*", |s| CharStyle { italic: true, ..s }),
-            ("_", |s| CharStyle { italic: true, ..s }),
-        ] {
-            if !rest.starts_with(delim) {
-                continue;
-            }
-            // left-flanking: next char is not whitespace; '_' must not be intraword
-            let after = rest[delim.len()..].chars().next();
-            if after.is_none_or(char::is_whitespace) {
-                continue;
-            }
-            if delim.starts_with('_') && text[..i].chars().last().is_some_and(char::is_alphanumeric)
-            {
-                continue;
-            }
-            if let Some(end) = find_closing(rest, delim.len(), delim) {
-                let inner = &rest[delim.len()..end];
-                if inner.ends_with(' ') {
-                    continue;
+            let fmt = ParaFmt {
+                table_id: tid,
+                table_row: r as u16,
+                table_col: c as u16,
+                align: tb.aligns.get(c).copied().unwrap_or(Align::Left),
+                ..ParaFmt::default()
+            };
+            let mut p = Para::new(base, fmt);
+            for (ch, mut st) in cell_chars {
+                if r == 0 {
+                    st.bold = true;
                 }
-                if delim.starts_with('_')
-                    && rest[end + delim.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(char::is_alphanumeric)
-                {
-                    continue;
-                }
-                parse_inline(doc, p, inner, f(base));
-                i += end + delim.len();
-                handled = true;
-                break;
+                p.text.push(ch);
+                p.styles.push(st);
             }
+            doc.paras.push(p);
         }
-        if handled {
-            continue;
-        }
-        let ch = rest.chars().next().unwrap_or(' ');
-        push(p, &ch.to_string(), base);
-        i += ch.len_utf8();
+        specs.push(TableRowSpec {
+            cells,
+            min_height_pt: 0.0,
+            grid_after: 0,
+            cant_split: false,
+            is_header: r == 0,
+        });
     }
+    doc.tables.push(DocTable {
+        id: tid,
+        grid_cols_in: vec![col_w; ncols],
+        rows: specs,
+        indent_in: 0.0,
+    });
+}
+
+/// Parses CommonMark + GitHub Flavored Markdown (tables, strikethrough, task lists,
+/// footnotes, superscript/subscript, reference links, nested lists/blockquotes, and
+/// inline HTML tags `<mark>`, `<u>`, `<sup>`, `<sub>`, `<br>`) into a `Document`.
+pub fn from_markdown(src: &str) -> Document {
+    let mut doc = Document {
+        paras: Vec::new(),
+        ..Default::default()
+    };
+    let styles = named_styles();
+    let base = CharStyle::default();
+
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_SUPERSCRIPT);
+    opts.insert(Options::ENABLE_SUBSCRIPT);
+
+    let parser = Parser::new_ext(src, opts);
+
+    let mut list_stack: Vec<ListState> = Vec::new();
+    let mut quote_depth: usize = 0;
+    let mut style_stack: Vec<CharStyle> = vec![base];
+    let mut cur_para: Option<Para> = None;
+    let mut in_code_block = false;
+    let mut code_buf = String::new();
+    let mut table: Option<TableBuilder> = None;
+    let mut pending_image: Option<(String, String)> = None;
+    let mut pending_item_open = false;
+
+    let flush_para = |doc: &mut Document, cur_para: &mut Option<Para>| {
+        if let Some(p) = cur_para.take() {
+            doc.paras.push(p);
+        }
+    };
+
+    let open_item_para = |list_stack: &[ListState],
+                          quote_depth: usize,
+                          styles: &[NamedStyle],
+                          base: CharStyle|
+     -> (Para, CharStyle) {
+        let lvl = list_stack.len().saturating_sub(1).min(8) as u8;
+        let (kind, lid) = list_stack
+            .last()
+            .map_or((ListKind::Bullet, 0), |ls| (ls.kind, ls.list_id));
+        let mut fmt = ParaFmt {
+            list: kind,
+            indent: lvl,
+            list_id: lid,
+            ..ParaFmt::default()
+        };
+        let chr = if quote_depth > 0 {
+            fmt.style = 7;
+            fmt.left_in += (quote_depth.saturating_sub(1) as f32) * 0.25;
+            styles[7].chr
+        } else {
+            base
+        };
+        (Para::new(chr, fmt), chr)
+    };
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => {
+                    if table.is_some() {
+                        // cell text flows directly into TableBuilder
+                    } else if pending_item_open && cur_para.is_some() {
+                        pending_item_open = false;
+                    } else {
+                        flush_para(&mut doc, &mut cur_para);
+                        let (fmt, chr) = if quote_depth > 0 {
+                            let mut f = ParaFmt {
+                                style: 7,
+                                ..styles[7].fmt
+                            };
+                            if quote_depth > 1 {
+                                f.left_in += ((quote_depth - 1) as f32) * 0.25;
+                            }
+                            (f, styles[7].chr)
+                        } else if !list_stack.is_empty() {
+                            let lvl = list_stack.len().saturating_sub(1).min(8) as u8;
+                            (
+                                ParaFmt {
+                                    left_in: (lvl as f32 + 1.0) * 0.5,
+                                    space_after: MD_GAP,
+                                    ..ParaFmt::default()
+                                },
+                                base,
+                            )
+                        } else {
+                            (
+                                ParaFmt {
+                                    space_after: MD_GAP,
+                                    ..ParaFmt::default()
+                                },
+                                base,
+                            )
+                        };
+                        cur_para = Some(Para::new(chr, fmt));
+                        style_stack.push(chr);
+                    }
+                }
+                Tag::Heading { level, .. } => {
+                    flush_para(&mut doc, &mut cur_para);
+                    let idx = heading_style(level);
+                    let fmt = ParaFmt {
+                        style: idx,
+                        keep_next: true,
+                        ..styles[idx].fmt
+                    };
+                    let chr = styles[idx].chr;
+                    cur_para = Some(Para::new(chr, fmt));
+                    style_stack.push(chr);
+                }
+                Tag::BlockQuote(_) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    quote_depth += 1;
+                }
+                Tag::CodeBlock(_) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    in_code_block = true;
+                    code_buf.clear();
+                }
+                Tag::List(start_opt) => {
+                    if cur_para.is_some() {
+                        flush_para(&mut doc, &mut cur_para);
+                        pending_item_open = false;
+                    }
+                    let lvl = list_stack.len().min(8);
+                    let (kind, list_id) = match start_opt {
+                        Some(start) => {
+                            let lid = if start != 1 {
+                                let def_id = doc.list_defs.len() as u16 + 1;
+                                let levels = (0..9)
+                                    .map(|n| ListLevel {
+                                        fmt: NumFmt::Decimal,
+                                        text: format!("%{}.", n + 1),
+                                        start: if n == lvl { start as u32 } else { 1 },
+                                        left_in: n as f32 * 0.5 + 0.25,
+                                        first_in: -0.25,
+                                        ..ListLevel::default()
+                                    })
+                                    .collect();
+                                doc.list_defs.push(ListDef { id: def_id, levels });
+                                def_id
+                            } else {
+                                0
+                            };
+                            (ListKind::Number, lid)
+                        }
+                        None => (ListKind::Bullet, 0),
+                    };
+                    list_stack.push(ListState { kind, list_id });
+                }
+                Tag::Item => {
+                    flush_para(&mut doc, &mut cur_para);
+                    let (p, chr) = open_item_para(&list_stack, quote_depth, &styles, base);
+                    cur_para = Some(p);
+                    style_stack.push(chr);
+                    pending_item_open = true;
+                }
+                Tag::Table(aligns) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    let mapped = aligns
+                        .into_iter()
+                        .map(|a| match a {
+                            Alignment::Center => Align::Center,
+                            Alignment::Right => Align::Right,
+                            Alignment::Left | Alignment::None => Align::Left,
+                        })
+                        .collect();
+                    table = Some(TableBuilder {
+                        aligns: mapped,
+                        ..Default::default()
+                    });
+                }
+                Tag::TableHead => {
+                    if let Some(tb) = table.as_mut() {
+                        tb.in_head = true;
+                        tb.cur_row.clear();
+                    }
+                }
+                Tag::TableRow => {
+                    if let Some(tb) = table.as_mut() {
+                        tb.cur_row.clear();
+                    }
+                }
+                Tag::TableCell => {
+                    if let Some(tb) = table.as_mut() {
+                        tb.in_cell = true;
+                        tb.cur_cell.clear();
+                        let mut st = base;
+                        if tb.in_head {
+                            st.bold = true;
+                        }
+                        style_stack.push(st);
+                    }
+                }
+                Tag::FootnoteDefinition(label) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    let mut p = Para::new(
+                        CharStyle { size: 9.5, ..base },
+                        ParaFmt {
+                            space_after: 4.0,
+                            left_in: 0.25,
+                            first_in: -0.25,
+                            ..ParaFmt::default()
+                        },
+                    );
+                    let prefix = format!("[{label}] ");
+                    push_styled_str(
+                        &mut p.text,
+                        &mut p.styles,
+                        &prefix,
+                        CharStyle {
+                            size: 9.5,
+                            bold: true,
+                            ..base
+                        },
+                    );
+                    cur_para = Some(p);
+                    style_stack.push(CharStyle { size: 9.5, ..base });
+                }
+                Tag::Strong => {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.bold = true;
+                    style_stack.push(st);
+                }
+                Tag::Emphasis => {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.italic = true;
+                    style_stack.push(st);
+                }
+                Tag::Strikethrough => {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.strike = true;
+                    style_stack.push(st);
+                }
+                Tag::Superscript => {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.script = 1;
+                    style_stack.push(st);
+                }
+                Tag::Subscript => {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.script = -1;
+                    style_stack.push(st);
+                }
+                Tag::Link { dest_url, .. } => {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.link = doc.add_link(&dest_url);
+                    style_stack.push(st);
+                }
+                Tag::Image { dest_url, .. } => {
+                    pending_image = Some((dest_url.to_string(), String::new()));
+                }
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph => {
+                    if table.is_none() && (list_stack.is_empty() || !pending_item_open) {
+                        flush_para(&mut doc, &mut cur_para);
+                        if style_stack.len() > 1 {
+                            style_stack.pop();
+                        }
+                    }
+                }
+                TagEnd::Heading(_) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    if style_stack.len() > 1 {
+                        style_stack.pop();
+                    }
+                }
+                TagEnd::BlockQuote(_) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    quote_depth = quote_depth.saturating_sub(1);
+                }
+                TagEnd::CodeBlock => {
+                    in_code_block = false;
+                    push_code_block(&mut doc, &code_buf);
+                    code_buf.clear();
+                }
+                TagEnd::List(_) => {
+                    flush_para(&mut doc, &mut cur_para);
+                    list_stack.pop();
+                    if list_stack.is_empty() {
+                        if let Some(last) = doc.paras.last_mut() {
+                            last.fmt.space_after = MD_GAP;
+                        }
+                    }
+                }
+                TagEnd::Item => {
+                    flush_para(&mut doc, &mut cur_para);
+                    pending_item_open = false;
+                    if style_stack.len() > 1 {
+                        style_stack.pop();
+                    }
+                }
+                TagEnd::TableHead => {
+                    if let Some(tb) = table.as_mut() {
+                        tb.in_head = false;
+                        if !tb.cur_row.is_empty() {
+                            let row = std::mem::take(&mut tb.cur_row);
+                            tb.rows.push(row);
+                        }
+                    }
+                }
+                TagEnd::TableRow => {
+                    if let Some(tb) = table.as_mut() {
+                        let row = std::mem::take(&mut tb.cur_row);
+                        tb.rows.push(row);
+                    }
+                }
+                TagEnd::TableCell => {
+                    if let Some(tb) = table.as_mut() {
+                        tb.in_cell = false;
+                        let cell = std::mem::take(&mut tb.cur_cell);
+                        tb.cur_row.push(cell);
+                        if style_stack.len() > 1 {
+                            style_stack.pop();
+                        }
+                    }
+                }
+                TagEnd::Table => {
+                    if let Some(tb) = table.take() {
+                        flush_table(&mut doc, tb);
+                    }
+                }
+                TagEnd::FootnoteDefinition => {
+                    flush_para(&mut doc, &mut cur_para);
+                    if style_stack.len() > 1 {
+                        style_stack.pop();
+                    }
+                }
+                TagEnd::Strong
+                | TagEnd::Emphasis
+                | TagEnd::Strikethrough
+                | TagEnd::Superscript
+                | TagEnd::Subscript
+                | TagEnd::Link => {
+                    if style_stack.len() > 1 {
+                        style_stack.pop();
+                    }
+                }
+                TagEnd::Image => {
+                    if let Some((url, alt)) = pending_image.take() {
+                        if let Some(id) = add_image(&mut doc, &alt, &url) {
+                            let standalone = cur_para.as_ref().is_some_and(|p| p.text.is_empty());
+                            if standalone {
+                                cur_para = None;
+                            } else {
+                                flush_para(&mut doc, &mut cur_para);
+                            }
+                            doc.paras.push(Para::new(
+                                base,
+                                ParaFmt {
+                                    image_id: id,
+                                    space_after: MD_GAP,
+                                    ..ParaFmt::default()
+                                },
+                            ));
+                        } else if !alt.is_empty() {
+                            let st = *style_stack.last().unwrap_or(&base);
+                            if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                                for c in alt.chars() {
+                                    tb.cur_cell.push((c, st));
+                                }
+                            } else if let Some(p) = cur_para.as_mut() {
+                                push_styled_str(&mut p.text, &mut p.styles, &alt, st);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Event::TaskListMarker(checked) => {
+                if let Some(p) = cur_para.as_mut() {
+                    p.fmt.list = ListKind::Checklist;
+                    p.fmt.checked = checked;
+                }
+            }
+            Event::Text(text) => {
+                if let Some((_, ref mut alt)) = pending_image {
+                    alt.push_str(&text);
+                } else if in_code_block {
+                    code_buf.push_str(&text);
+                } else {
+                    let st = *style_stack.last().unwrap_or(&base);
+                    if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                        for c in text.chars() {
+                            tb.cur_cell.push((c, st));
+                        }
+                    } else {
+                        if cur_para.is_none() {
+                            cur_para = Some(Para::new(
+                                st,
+                                ParaFmt {
+                                    space_after: MD_GAP,
+                                    ..ParaFmt::default()
+                                },
+                            ));
+                        }
+                        if let Some(p) = cur_para.as_mut() {
+                            push_styled_str(&mut p.text, &mut p.styles, &text, st);
+                        }
+                    }
+                }
+            }
+            Event::Code(code) => {
+                if let Some((_, ref mut alt)) = pending_image {
+                    alt.push_str(&code);
+                } else {
+                    let mut st = *style_stack.last().unwrap_or(&base);
+                    st.font = code_font();
+                    st.highlight = Some(CODE_BG);
+                    if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                        for c in code.chars() {
+                            tb.cur_cell.push((c, st));
+                        }
+                    } else if let Some(p) = cur_para.as_mut() {
+                        push_styled_str(&mut p.text, &mut p.styles, &code, st);
+                    }
+                }
+            }
+            Event::SoftBreak => {
+                if let Some((_, ref mut alt)) = pending_image {
+                    alt.push(' ');
+                } else {
+                    let st = *style_stack.last().unwrap_or(&base);
+                    if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                        tb.cur_cell.push((' ', st));
+                    } else if let Some(p) = cur_para.as_mut() {
+                        p.text.push(' ');
+                        p.styles.push(st);
+                    }
+                }
+            }
+            Event::HardBreak => {
+                let st = *style_stack.last().unwrap_or(&base);
+                if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                    tb.cur_cell.push(('\n', st));
+                } else if let Some(p) = cur_para.as_mut() {
+                    p.text.push('\n');
+                    p.styles.push(st);
+                }
+            }
+            Event::Rule => {
+                flush_para(&mut doc, &mut cur_para);
+                doc.paras.push(Para::new(
+                    base,
+                    ParaFmt {
+                        hr: true,
+                        space_after: MD_GAP,
+                        ..ParaFmt::default()
+                    },
+                ));
+            }
+            Event::FootnoteReference(label) => {
+                let mut st = *style_stack.last().unwrap_or(&base);
+                st.script = 1;
+                let s = format!("[{label}]");
+                if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                    for c in s.chars() {
+                        tb.cur_cell.push((c, st));
+                    }
+                } else if let Some(p) = cur_para.as_mut() {
+                    push_styled_str(&mut p.text, &mut p.styles, &s, st);
+                }
+            }
+            Event::InlineHtml(html) | Event::Html(html) => {
+                let tag = html.trim().to_ascii_lowercase();
+                match tag.as_str() {
+                    "<u>" => {
+                        let mut st = *style_stack.last().unwrap_or(&base);
+                        st.underline = true;
+                        style_stack.push(st);
+                    }
+                    "<mark>" => {
+                        let mut st = *style_stack.last().unwrap_or(&base);
+                        st.highlight = Some([254, 240, 138]);
+                        style_stack.push(st);
+                    }
+                    "<sup>" => {
+                        let mut st = *style_stack.last().unwrap_or(&base);
+                        st.script = 1;
+                        style_stack.push(st);
+                    }
+                    "<sub>" => {
+                        let mut st = *style_stack.last().unwrap_or(&base);
+                        st.script = -1;
+                        style_stack.push(st);
+                    }
+                    "</u>" | "</mark>" | "</sup>" | "</sub>" => {
+                        if style_stack.len() > 1 {
+                            style_stack.pop();
+                        }
+                    }
+                    "<br>" | "<br/>" | "<br />" => {
+                        let st = *style_stack.last().unwrap_or(&base);
+                        if let Some(tb) = table.as_mut().filter(|t| t.in_cell) {
+                            tb.cur_cell.push(('\n', st));
+                        } else if let Some(p) = cur_para.as_mut() {
+                            p.text.push('\n');
+                            p.styles.push(st);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    flush_para(&mut doc, &mut cur_para);
+    if doc.paras.is_empty() {
+        doc.paras.push(Para::new(base, ParaFmt::default()));
+    }
+    doc
 }
 
 #[cfg(test)]
@@ -1142,5 +1025,18 @@ mod tests {
         let d2 = from_markdown(&back);
         assert_eq!(d2.paras[0].string(), d.paras[0].string());
         assert!(d2.paras[0].styles[5].bold);
+    }
+
+    #[test]
+    fn markdown_gfm_reference_links_tasklists_escaped_pipes_and_keep_next() {
+        let md = "## Section\n\nSee [Rust][r], ~~old~~, <mark>hi</mark>, and note[^1].\n\n- [x] Done\n- [ ] Todo\n\n| Expr | Val |\n|---|---|\n| a \\| b | 1 |\n\n[r]: https://www.rust-lang.org\n\n[^1]: Footnote body\n";
+        let d = from_markdown(md);
+        assert!(d.paras[0].fmt.keep_next, "headings set keep_next");
+        assert!(d.links.iter().any(|u| u == "https://www.rust-lang.org"), "reference link resolved");
+        assert!(d.paras.iter().any(|p| p.fmt.list == ListKind::Checklist && p.fmt.checked && p.string() == "Done"));
+        assert!(d.paras.iter().any(|p| p.fmt.list == ListKind::Checklist && !p.fmt.checked && p.string() == "Todo"));
+        assert!(d.paras.iter().any(|p| p.fmt.table_id > 0 && p.string() == "a | b"), "escaped pipe inside GFM table cell");
+        assert!(d.tables[0].rows[0].is_header, "GFM table header row marked as repeating header");
+        assert!(d.paras.iter().any(|p| p.string().contains("Footnote body")));
     }
 }

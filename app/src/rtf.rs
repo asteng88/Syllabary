@@ -1309,6 +1309,7 @@ pub fn from_rtf(src: &str) -> Document {
                                 cells,
                                 min_height_pt: (row_def.height.abs() as f32 / 20.0),
                                 grid_after: 0,
+                                ..TableRowSpec::default()
                             });
                         }
                         cell_idx = 0;

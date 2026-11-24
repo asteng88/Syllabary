@@ -77,6 +77,7 @@ pub enum Action {
     ZoomOut,
     Draft(bool),
     ToggleDark,
+    CheckForUpdates,
     PageBreak,
     HorizontalRule,
     InsertText(String),
@@ -207,6 +208,26 @@ pub fn recovery_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("Syllabary").join("recovery"))
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Prompt,
+    Downloading,
+    ReadyToRestart(String),
+    Error(String),
+}
+
+#[derive(Default)]
+pub struct UpdateState {
+    pub check_rx: Option<(bool, std::sync::mpsc::Receiver<crate::updater::CheckOutcome>)>,
+    pub progress: Arc<std::sync::Mutex<(u64, u64)>>,
+    pub cancel: Arc<AtomicBool>,
+    pub download_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    pub release: Option<crate::updater::ReleaseInfo>,
+    pub phase: UpdatePhase,
+}
+
 pub struct App {
     pub egui_ctx: egui::Context,
     pub tabs: Vec<Tab>,
@@ -258,6 +279,7 @@ pub struct App {
     pub comment_reply_draft: (u64, String),
     pub wc_metric: u8,
     pub table_panel_collapsed: bool,
+    pub update: UpdateState,
 }
 
 impl App {
@@ -321,7 +343,14 @@ impl App {
             comment_reply_draft: (0, String::new()),
             wc_metric: 0,
             table_panel_collapsed: false,
+            update: UpdateState::default(),
         };
+        crate::updater::cleanup_old_executable_backup();
+        if app.screenshot.is_none()
+            && std::env::var("SYLLABARY_NO_UPDATE_CHECK").is_err()
+        {
+            app.start_update_check(false);
+        }
         app.rebuild_sc_table();
         for p in open {
             app.open_path(&p);
@@ -504,6 +533,9 @@ impl App {
             path.file_name().map_or_else(|| "Document".into(), |n| n.to_string_lossy().to_string()),
             doc,
         );
+        if ext == "pdf" {
+            t.attach_pdf_exact_view(bytes);
+        }
         self.next_id += 1;
         if matches!(ext.as_str(), "wpx" | "gdoc" | "rtf" | "txt" | "docx" | "md" | "markdown" | "pdf") {
             t.path = Some(path.to_path_buf());
@@ -686,6 +718,153 @@ impl App {
 
     pub fn toast(&mut self, msg: String) {
         self.toast = Some((msg, -1.0));
+    }
+
+    pub fn start_update_check(&mut self, manual: bool) {
+        if self.update.check_rx.is_some() {
+            if manual {
+                self.toast("Already checking for updates…".into());
+            }
+            return;
+        }
+        if manual {
+            self.toast("Checking GitHub for updates…".into());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let outcome = crate::updater::check_for_updates(crate::updater::CURRENT_VERSION);
+            let _ = tx.send(outcome);
+            ctx.request_repaint();
+        });
+        self.update.check_rx = Some((manual, rx));
+    }
+
+    pub fn start_update_download(&mut self) {
+        let Some(rel) = self.update.release.clone() else {
+            return;
+        };
+        let Some(url) = rel.asset_url.clone() else {
+            self.update.phase = UpdatePhase::Error(
+                "No downloadable executable asset was found for this OS in the GitHub release.".into(),
+            );
+            return;
+        };
+        let dest = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(format!("update_{}.exe", rel.version))))
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("syllabary_update_{}.exe", rel.version)));
+
+        self.update.cancel.store(false, Ordering::Relaxed);
+        if let Ok(mut p) = self.update.progress.lock() {
+            *p = (0, rel.asset_size);
+        }
+        self.update.phase = UpdatePhase::Downloading;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let prog = self.update.progress.clone();
+        let cancel = self.update.cancel.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let res = crate::updater::download_update_asset(
+                &url,
+                &dest,
+                rel.asset_size,
+                rel.asset_sha256.as_deref(),
+                &cancel,
+                |down, tot| {
+                    if let Ok(mut p) = prog.lock() {
+                        *p = (down, tot);
+                    }
+                    ctx.request_repaint();
+                },
+            )
+            .map(|()| dest);
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+        self.update.download_rx = Some(rx);
+    }
+
+    pub fn poll_updater(&mut self, ctx: &egui::Context) {
+        if let Some((manual, rx)) = &self.update.check_rx {
+            match rx.try_recv() {
+                Ok(outcome) => {
+                    let manual = *manual;
+                    self.update.check_rx = None;
+                    match outcome {
+                        crate::updater::CheckOutcome::UpdateAvailable(info) => {
+                            self.update.release = Some(info);
+                            self.update.phase = UpdatePhase::Prompt;
+                            self.dialog = Dialog::Update;
+                        }
+                        crate::updater::CheckOutcome::UpToDate(latest) => {
+                            if manual {
+                                self.toast(format!(
+                                    "Syllabary v{} is up to date (latest: v{latest}).",
+                                    crate::updater::CURRENT_VERSION
+                                ));
+                            }
+                        }
+                        crate::updater::CheckOutcome::NoReleases => {
+                            if manual {
+                                self.toast("No GitHub releases published yet for Syllabary.".into());
+                            }
+                        }
+                        crate::updater::CheckOutcome::Error(e) => {
+                            if manual {
+                                self.toast(format!("Update check failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.update.check_rx = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.update.download_rx {
+            match rx.try_recv() {
+                Ok(res) => {
+                    self.update.download_rx = None;
+                    match res {
+                        Ok(dest_file) => {
+                            let ver = self
+                                .update
+                                .release
+                                .as_ref()
+                                .map_or_else(|| "latest".into(), |r| r.version.clone());
+                            match crate::updater::replace_executable_in_place(&dest_file) {
+                                Ok(_) => {
+                                    self.update.phase = UpdatePhase::ReadyToRestart(ver);
+                                }
+                                Err(e) => {
+                                    self.update.phase = UpdatePhase::Error(format!(
+                                        "{e}\n\nDownloaded update saved to:\n{}",
+                                        dest_file.display()
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if !self.update.cancel.load(Ordering::Relaxed) {
+                                self.update.phase = UpdatePhase::Error(e);
+                            } else {
+                                self.update.phase = UpdatePhase::Idle;
+                                self.dialog = Dialog::None;
+                            }
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(80));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.update.download_rx = None;
+                }
+            }
+        }
     }
 
     pub fn act(&mut self, a: Action) {
@@ -1053,6 +1232,9 @@ impl App {
                     self.fonts_rev = self.fonts_rev.wrapping_add(1);
                     ctx.request_repaint();
                     self.save_config();
+                }
+                Action::CheckForUpdates => {
+                    self.start_update_check(true);
                 }
                 Action::PageBreak => self.tab().page_break(now),
                 Action::HorizontalRule => self.tab().insert_hr(now),
@@ -2092,6 +2274,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.frame += 1;
         let now = ctx.input(|i| i.time);
+        self.poll_updater(&ctx);
 
         // screenshot mode: draw ~120 frames, save the picture, exit
         if let Some(path) = self.screenshot.clone() {
@@ -2143,8 +2326,8 @@ impl eframe::App for App {
             }
         }
 
-        // window title, like "Syllabary - [Untitled1]"
-        let title = format!("{APP_NAME} - [{}]", self.tab_ref().title());
+        // window title, like "Syllabary v0.2.1 - [Untitled1]"
+        let title = format!("{APP_NAME} v{} - [{}]", crate::updater::CURRENT_VERSION, self.tab_ref().title());
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;

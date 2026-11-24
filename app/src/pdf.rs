@@ -17,84 +17,6 @@ use crate::doc::{lerp_rgb, Align, CharStyle, Document, FooterSegment, ListKind};
 use crate::fonts::FontBook;
 use crate::layout;
 
-/// Font family groups → PDF standard font base names (regular, bold, italic, bold italic).
-const FAMILIES: [[&str; 4]; 3] = [
-    ["Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic"],
-    ["Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"],
-    ["Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"],
-];
-
-fn family_of(font: u16) -> usize {
-    match crate::doc::font_category(font) {
-        crate::doc::FontCat::Serif => 0,
-        crate::doc::FontCat::Mono => 2,
-        _ => 1,
-    }
-}
-
-fn font_res(s: &CharStyle) -> usize {
-    family_of(s.font) * 4 + (s.bold as usize) + 2 * (s.italic as usize)
-}
-
-/// Unicode → Windows-1252 byte (the encoding the standard fonts use here).
-fn win_ansi(c: char) -> u8 {
-    let u = c as u32;
-    if (0x20..0x7f).contains(&u) || (0xa0..=0xff).contains(&u) {
-        return u as u8;
-    }
-    match c {
-        '€' => 0x80,
-        '‚' => 0x82,
-        'ƒ' => 0x83,
-        '„' => 0x84,
-        '…' => 0x85,
-        '†' => 0x86,
-        '‡' => 0x87,
-        'ˆ' => 0x88,
-        '‰' => 0x89,
-        'Š' => 0x8a,
-        '‹' => 0x8b,
-        'Œ' => 0x8c,
-        'Ž' => 0x8e,
-        '‘' => 0x91,
-        '’' => 0x92,
-        '“' => 0x93,
-        '”' => 0x94,
-        '•' | '◦' | '▪' => 0x95,
-        '–' => 0x96,
-        '—' | '─' => 0x97,
-        '˜' => 0x98,
-        '™' => 0x99,
-        'š' => 0x9a,
-        '›' => 0x9b,
-        'œ' => 0x9c,
-        'ž' => 0x9e,
-        'Ÿ' => 0x9f,
-        _ => b'?',
-    }
-}
-
-fn pdf_string(text: &str) -> Vec<u8> {
-    let mut out = vec![b'('];
-    for c in text.chars() {
-        let b = win_ansi(c);
-        if b == b'(' || b == b')' || b == b'\\' {
-            out.push(b'\\');
-        }
-        out.push(b);
-    }
-    out.push(b')');
-    out
-}
-
-fn rgb(c: [u8; 3]) -> String {
-    format!("{:.4} {:.4} {:.4}", c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0)
-}
-
-/// Approximate Helvetica width (header/footer centring only).
-fn approx_width(text: &str, size: f32) -> f32 {
-    text.chars().count() as f32 * size * 0.5
-}
 
 // ── High-DPI WYSIWYG Software Page Canvas ───────────────────────────────
 
@@ -719,37 +641,153 @@ pub fn render_page_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, pa
     }
 }
 
-// ── Calibrated sRGB PDF Export (Vector + WYSIWYG Image XObject) ─────────
 
-struct Page {
-    ops: Vec<u8>,
-    image: Option<(u32, u32, Vec<u8>)>,
+
+// ── True Vector PDF Export (krilla: embedded subsetted fonts, vector gradients, links & outline) ──
+
+use std::collections::HashMap;
+use krilla::action::{Action, LinkAction};
+use krilla::annotation::{Annotation, LinkAnnotation, Target};
+use krilla::color::rgb as krgb;
+use krilla::destination::XyzDestination;
+use krilla::geom::{PathBuilder, Point, Rect as KRect, Size, Transform};
+use krilla::image::Image as KImage;
+use krilla::metadata::Metadata;
+use krilla::num::NormalizedF32;
+use krilla::outline::{Outline, OutlineNode};
+use krilla::page::PageSettings;
+use krilla::paint::{Fill, FillRule, LinearGradient, Paint, SpreadMethod, Stop, Stroke as KStroke};
+use krilla::surface::Surface;
+use krilla::text::{Font as KFont, TextDirection};
+
+fn kcolor(c: [u8; 3]) -> krgb::Color {
+    krgb::Color::new(c[0], c[1], c[2])
 }
 
-impl Page {
-    fn push(&mut self, s: &str) {
-        self.ops.extend_from_slice(s.as_bytes());
+fn fill_solid(c: [u8; 3]) -> Fill {
+    Fill {
+        paint: kcolor(c).into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::NonZero,
     }
-    fn text(&mut self, font: usize, size: f32, color: [u8; 3], x: f32, y: f32, txt: &str) {
-        self.push(&format!("BT /F{} {:.2} Tf {} rg {:.2} {:.2} Td ", font + 1, size, rgb(color), x, y));
-        let s = pdf_string(txt);
-        self.ops.extend_from_slice(&s);
-        self.push(" Tj ET\n");
+}
+
+fn rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<krilla::geom::Path> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
     }
-    fn rect(&mut self, color: [u8; 3], x: f32, y: f32, w: f32, h: f32) {
-        self.push(&format!("{} rg {:.2} {:.2} {:.2} {:.2} re f\n", rgb(color), x, y, w, h));
+    let mut pb = PathBuilder::new();
+    pb.move_to(x, y);
+    pb.line_to(x + w, y);
+    pb.line_to(x + w, y + h);
+    pb.line_to(x, y + h);
+    pb.close();
+    pb.finish()
+}
+
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<krilla::geom::Path> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
     }
-    fn gradient_pill(&mut self, c1: [u8; 3], c2: [u8; 3], x: f32, y: f32, w: f32, h: f32) {
-        if w <= 0.0 || h <= 0.0 {
-            return;
+    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    if r <= 0.25 {
+        return rect_path(x, y, w, h);
+    }
+    let k = r * 0.552_284_8;
+    let x1 = x + w;
+    let y1 = y + h;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x1 - r, y);
+    pb.cubic_to(x1 - r + k, y, x1, y + r - k, x1, y + r);
+    pb.line_to(x1, y1 - r);
+    pb.cubic_to(x1, y1 - r + k, x1 - r + k, y1, x1 - r, y1);
+    pb.line_to(x + r, y1);
+    pb.cubic_to(x + r - k, y1, x, y1 - r + k, x, y1 - r);
+    pb.line_to(x, y + r);
+    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
+fn draw_rect(surface: &mut Surface<'_>, c: [u8; 3], x: f32, y: f32, w: f32, h: f32) {
+    if let Some(path) = rect_path(x, y, w, h) {
+        surface.set_stroke(None);
+        surface.set_fill(Some(fill_solid(c)));
+        surface.draw_path(&path);
+    }
+}
+
+fn draw_gradient_pill(
+    surface: &mut Surface<'_>,
+    c1: [u8; 3],
+    c2: [u8; 3],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+) {
+    let Some(path) = rounded_rect_path(x, y, w, h, radius) else {
+        return;
+    };
+    surface.set_stroke(None);
+    if c1 == c2 {
+        surface.set_fill(Some(fill_solid(c1)));
+    } else {
+        let grad = LinearGradient {
+            x1: x,
+            y1: y,
+            x2: x + w,
+            y2: y,
+            transform: Transform::identity(),
+            spread_method: SpreadMethod::Pad,
+            stops: vec![
+                Stop {
+                    offset: NormalizedF32::ZERO,
+                    color: kcolor(c1).into(),
+                    opacity: NormalizedF32::ONE,
+                },
+                Stop {
+                    offset: NormalizedF32::ONE,
+                    color: kcolor(c2).into(),
+                    opacity: NormalizedF32::ONE,
+                },
+            ],
+            anti_alias: true,
+        };
+        surface.set_fill(Some(Fill {
+            paint: Paint::from(grad),
+            opacity: NormalizedF32::ONE,
+            rule: FillRule::NonZero,
+        }));
+    }
+    surface.draw_path(&path);
+}
+
+struct FontCache {
+    loaded: HashMap<(u16, bool, bool), Option<KFont>>,
+    fallback: Option<KFont>,
+}
+
+impl FontCache {
+    fn new() -> Self {
+        let fallback = crate::fonts::font_file_bytes(crate::doc::DEFAULT_FONT, false, false)
+            .and_then(|(bytes, _, _)| KFont::new(bytes.into(), 0));
+        Self {
+            loaded: HashMap::new(),
+            fallback,
         }
-        let steps = if c1 == c2 { 1 } else { 16 };
-        let sw = w / steps as f32;
-        for i in 0..steps {
-            let t = if steps <= 1 { 0.0 } else { i as f32 / (steps - 1) as f32 };
-            let col = lerp_rgb(c1, c2, t);
-            self.rect(col, x + i as f32 * sw, y, sw + 0.15, h);
+    }
+
+    fn get(&mut self, font: u16, bold: bool, italic: bool) -> Option<KFont> {
+        if let Some(cached) = self.loaded.get(&(font, bold, italic)) {
+            return cached.clone().or_else(|| self.fallback.clone());
         }
+        let resolved = crate::fonts::font_file_bytes(font, bold, italic)
+            .and_then(|(bytes, _, _)| KFont::new(bytes.into(), 0));
+        self.loaded.insert((font, bold, italic), resolved.clone());
+        resolved.or_else(|| self.fallback.clone())
     }
 }
 
@@ -757,328 +795,566 @@ pub fn export(ctx: &egui::Context, doc: &Document, book: &FontBook) -> Vec<u8> {
     export_page_range(ctx, doc, book, None)
 }
 
-/// Exports the document (or a `1`-based inclusive page range `Some((first_page, last_page))`) to PDF.
-pub fn export_page_range(ctx: &egui::Context, doc: &Document, book: &FontBook, page_range: Option<(usize, usize)>) -> Vec<u8> {
-    // Render high-DPI WYSIWYG page bitmaps (192 DPI base × screen scale)
-    let rgba_pages = render_pages_rgba(ctx, doc, book, 2.0);
-
-    // 0.75 × 96 = 72 units per inch: one unit is one PDF point.
+/// Exports the document (or a `1`-based inclusive page range `Some((first_page, last_page))`)
+/// as a true vector PDF via `krilla` with embedded subsetted TrueType/OpenType fonts,
+/// selectable full-Unicode text, vector gradients, clickable links, metadata, and heading outline.
+pub fn export_page_range(
+    ctx: &egui::Context,
+    doc: &Document,
+    book: &FontBook,
+    page_range: Option<(usize, usize)>,
+) -> Vec<u8> {
+    // 0.75 × 96 = 72 units per inch: one layout unit is exactly one PDF point.
     let lay = layout::build(ctx, doc, book, 0.75, false);
-    let pw = lay.page_size.x;
-    let ph = lay.page_size.y;
-    let mut pages: Vec<Page> = (0..lay.pages)
-        .map(|i| {
-            let image = rgba_pages.get(i).map(|(w, h, rgba)| {
-                let mut rgb_bytes = Vec::with_capacity((*w as usize) * (*h as usize) * 3);
-                for &[r, g, b, _] in rgba.as_chunks::<4>().0 {
-                    rgb_bytes.push(r);
-                    rgb_bytes.push(g);
-                    rgb_bytes.push(b);
+    let pw = lay.page_size.x.max(1.0);
+    let ph = lay.page_size.y.max(1.0);
+    let total_pages = lay.pages.max(1);
+    let (start_p, end_p) = match page_range {
+        Some((f1, l1)) => {
+            let s = f1.saturating_sub(1).min(total_pages - 1);
+            let e = l1.clamp(1, total_pages);
+            if s < e { (s, e) } else { (0, total_pages) }
+        }
+        None => (0, total_pages),
+    };
+
+    // Measure headers/footers with the exact egui font galleys for pixel-aligned centering
+    let mut header_galley: Option<Arc<Galley>> = None;
+    let mut footer_galleys: Vec<Option<Arc<Galley>>> = vec![None; total_pages];
+    let mut caption_galleys: HashMap<u64, Arc<Galley>> = HashMap::new();
+    ctx.fonts_mut(|fonts| {
+        if !doc.header.is_empty() {
+            header_galley = Some(layout::hf_galley(fonts, book, doc, false, &doc.header, lay.ppi));
+        }
+        for k in start_p..end_p {
+            if doc.resolved_page_footer(k, total_pages).is_none() {
+                let mut foot = crate::doc::update_footer_page_nums(&doc.footer, k + 1, total_pages);
+                if doc.page.page_numbers {
+                    let pn = format!("Page {}", k + 1);
+                    foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
                 }
-                (*w, *h, rgb_bytes)
-            });
-            Page { ops: Vec::new(), image }
-        })
-        .collect();
+                if !foot.is_empty() {
+                    footer_galleys[k] = Some(layout::hf_galley(fonts, book, doc, true, &foot, lay.ppi));
+                }
+            }
+        }
+        for img in &doc.images {
+            let cap = img.caption.trim();
+            if !cap.is_empty() {
+                let mut job = LayoutJob::default();
+                let st = CharStyle {
+                    font: crate::doc::DEFAULT_FONT,
+                    size: 9.5,
+                    italic: true,
+                    color: [100, 108, 120],
+                    ..CharStyle::default()
+                };
+                job.append(cap, 0.0, layout::text_format(book, &st, lay.ppi));
+                caption_galleys.insert(img.id, fonts.layout_job(job));
+            }
+        }
+    });
+
+    let mut kdoc = krilla::Document::new();
+    let mut meta = Metadata::new().producer("Syllabary".to_string());
+    if !doc.info.title.is_empty() {
+        meta = meta.title(doc.info.title.clone());
+    }
+    if !doc.info.author.is_empty() {
+        meta = meta.authors(vec![doc.info.author.clone()]);
+    }
+    kdoc.set_metadata(meta);
+
+    let mut fonts = FontCache::new();
+    let mut outline = Outline::new();
+    let mut has_outline = false;
+    let mut img_cache: HashMap<u64, KImage> = HashMap::new();
     let pg = doc.page;
 
-    for (k, page) in pages.iter_mut().enumerate() {
-        if pg.background != [255, 255, 255] {
-            page.rect(pg.background, 0.0, 0.0, pw, ph);
-        }
-        if !doc.header.is_empty() {
-            let st = layout::hf_style(doc, false);
-            let w = approx_width(&doc.header, st.size);
-            let x = match doc.header_align {
-                Align::Left | Align::Justify => lay.content_offset.x,
-                Align::Center => (pw - w) * 0.5,
-                Align::Right => (lay.content_offset.x + lay.content_size.x - w).max(lay.content_offset.x),
-            };
-            let top = layout::hf_y(doc, &lay, false, st.size * 1.2);
-            page.text(font_res(&st), st.size, st.color, x, ph - top - st.size * 0.9, &doc.header);
-        }
-        if let Some(pf) = doc.resolved_page_footer(k, lay.pages) {
-            if let Some((x0, x1, y_bot, w_pt, col)) = pf.rule {
-                page.rect(col, x0, y_bot - w_pt * 0.5, (x1 - x0).max(1.0), w_pt.max(0.5));
+    for (out_page_idx, page_idx) in (start_p..end_p).enumerate() {
+        let Some(settings) = PageSettings::from_wh(pw, ph).or_else(|| PageSettings::from_wh(612.0, 792.0)) else {
+            break;
+        };
+        let mut page = kdoc.start_page_with(settings);
+        let mut page_links: Vec<(KRect, String)> = Vec::new();
+        {
+            let mut surface = page.surface();
+
+            // 1. Page background
+            if pg.background != [255, 255, 255] {
+                draw_rect(&mut surface, pg.background, 0.0, 0.0, pw, ph);
             }
-            for seg in &pf.segments {
-                let total_txt: String = seg.runs.iter().map(|r| r.text.as_str()).collect();
-                let dom_size = seg.runs.first().map_or(9.0, |r| r.style.size.max(4.5));
-                let est_w = approx_width(&total_txt, dom_size);
-                let mut cur_x = match seg.align {
-                    Align::Center => ((seg.x_pt + seg.max_x_pt) * 0.5 - est_w * 0.5).max(2.0),
-                    Align::Right => (seg.max_x_pt - est_w).max(2.0),
-                    Align::Left | Align::Justify => seg.x_pt.max(2.0),
-                };
-                for run in &seg.runs {
-                    let st = run.style;
-                    let sz = st.size.max(4.5);
-                    page.text(font_res(&st), sz, st.color, cur_x, seg.bottom_pt.max(2.0), &run.text);
-                    cur_x += approx_width(&run.text, sz);
+
+            // 2. Table cell shading & borders
+            for cell in lay.cells.iter().filter(|c| c.page == page_idx) {
+                let x0 = lay.content_offset.x + cell.rect.min.x;
+                let y0 = lay.content_offset.y + cell.rect.min.y;
+                let cw = cell.rect.width();
+                let ch = cell.rect.height();
+                if let Some(sh) = cell.shading {
+                    draw_rect(&mut surface, sh, x0, y0, cw, ch);
+                }
+                let b = cell.borders;
+                if let Some(spec) = b.top {
+                    let w = spec.width_pt.max(0.5);
+                    draw_rect(&mut surface, spec.color, x0, y0 - w * 0.5, cw, w);
+                }
+                if let Some(spec) = b.bottom {
+                    let w = spec.width_pt.max(0.5);
+                    draw_rect(&mut surface, spec.color, x0, y0 + ch - w * 0.5, cw, w);
+                }
+                if let Some(spec) = b.left {
+                    let w = spec.width_pt.max(0.5);
+                    draw_rect(&mut surface, spec.color, x0 - w * 0.5, y0, w, ch);
+                }
+                if let Some(spec) = b.right {
+                    let w = spec.width_pt.max(0.5);
+                    draw_rect(&mut surface, spec.color, x0 + cw - w * 0.5, y0, w, ch);
                 }
             }
-        } else {
-            let mut foot = crate::doc::update_footer_page_nums(&doc.footer, k + 1, lay.pages);
-            if pg.page_numbers {
-                let pn = format!("Page {}", k + 1);
-                foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
+
+            // 3. Lines on this page
+            for l in lay.lines.iter().filter(|l| l.page == page_idx) {
+                let para = &doc.paras[l.para];
+                let pfmt = para.fmt;
+                let ox = lay.content_offset.x + l.x;
+                let oy = lay.content_offset.y + l.y;
+
+                // Record Heading 1/2/3 bookmarks for PDF Outline
+                if l.first_in_para && matches!(pfmt.style, 4..=6) {
+                    let heading = para.string();
+                    let trimmed = heading.trim();
+                    if !trimmed.is_empty() {
+                        has_outline = true;
+                        outline.push_child(OutlineNode::new(
+                            trimmed.to_string(),
+                            XyzDestination::new(out_page_idx, Point::from_xy(ox, oy)),
+                        ));
+                    }
+                }
+
+                // Paragraph shading & borders
+                if let Some(sh) = pfmt.shading {
+                    if pfmt.table_id == 0 {
+                        let (bx0, bx1) = layout::para_block_x(doc, &lay, l.para);
+                        draw_rect(
+                            &mut surface,
+                            sh,
+                            lay.content_offset.x + bx0 - 4.0,
+                            oy - 0.5,
+                            (bx1 - bx0) + 8.0,
+                            l.height + 1.0,
+                        );
+                    }
+                }
+                for (r, col) in layout::para_border_rects(doc, &lay, l) {
+                    draw_rect(
+                        &mut surface,
+                        col,
+                        lay.content_offset.x + r.min.x,
+                        lay.content_offset.y + r.min.y,
+                        r.width(),
+                        r.height(),
+                    );
+                }
+
+                // Horizontal rule
+                if pfmt.hr && l.first_in_para {
+                    let hr_col = pfmt.hr_color.unwrap_or([180, 184, 192]);
+                    let w = if pfmt.hr_width_pt > 0.0 { pfmt.hr_width_pt } else { 1.0 };
+                    let y_mid = oy + l.height * 0.5;
+                    draw_rect(&mut surface, hr_col, lay.content_offset.x, y_mid - w * 0.5, lay.content_size.x, w);
+                }
+
+                // Embedded image + caption
+                if pfmt.image_id > 0 && l.first_in_para {
+                    let indent = doc.block_left_in(&pfmt).max(0.0) * lay.ppi + pfmt.right_in * lay.ppi;
+                    let cell_avail = if pfmt.table_id > 0 {
+                        lay.cells
+                            .iter()
+                            .find(|c| c.table_id == pfmt.table_id && c.row == pfmt.table_row && c.col == pfmt.table_col && c.page == l.page)
+                            .map(|c| (c.rect.width() - 8.0).max(12.0))
+                    } else {
+                        None
+                    };
+                    let avail = cell_avail.unwrap_or_else(|| (lay.content_size.x - indent).max(lay.ppi * 0.25));
+                    if let Some((iw_pt, ih_pt, _cap_h, _tot_h)) = layout::image_box(doc, pfmt.image_id, avail, lay.ppi) {
+                        if let Some(doc_img) = doc.image(pfmt.image_id) {
+                            let pad_top = if doc_img.seamless { 1.0 } else { 3.0 };
+                            let kimg = img_cache.entry(pfmt.image_id).or_insert_with(|| {
+                                let (sw, sh, rgba) = doc_img.decode_rgba().unwrap_or((1, 1, vec![255, 255, 255, 255]));
+                                KImage::from_rgba8(rgba, sw, sh)
+                            });
+                            if let Some(sz) = Size::from_wh(iw_pt, ih_pt) {
+                                surface.push_transform(&Transform::from_translate(ox, oy + pad_top));
+                                surface.draw_image(kimg.clone(), sz);
+                                surface.pop();
+                            }
+                            if let Some(cg) = caption_galleys.get(&pfmt.image_id) {
+                                if let Some(fnt) = fonts.get(crate::doc::DEFAULT_FONT, false, true) {
+                                    let cap_x = ox + (iw_pt - cg.rect.width()) * 0.5;
+                                    let cap_y = oy + pad_top + ih_pt + 13.0;
+                                    surface.set_stroke(None);
+                                    surface.set_fill(Some(fill_solid([100, 108, 120])));
+                                    surface.draw_text(
+                                        Point::from_xy(cap_x, cap_y),
+                                        fnt,
+                                        9.5,
+                                        doc_img.caption.trim(),
+                                        false,
+                                        TextDirection::Auto,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let Some(row) = l.galley.rows.first() else { continue };
+                let glyphs = &row.row.glyphs;
+                let gh = l.galley.rect.height();
+                let n = (l.end - l.start).min(glyphs.len());
+
+                // Contiguous highlight pills (solid & Craft left-to-right gradient)
+                let mut hk = 0;
+                while hk < n {
+                    let st = para.styles[l.start + hk];
+                    if let Some(c1) = st.highlight {
+                        let c2 = st.highlight_to.unwrap_or(c1);
+                        let seg_s = hk;
+                        hk += 1;
+                        while hk < n
+                            && para.styles[l.start + hk].highlight == Some(c1)
+                            && para.styles[l.start + hk].highlight_to.unwrap_or(c1) == c2
+                        {
+                            hk += 1;
+                        }
+                        let seg_e = hk;
+                        let (hy0, hy1) = layout::highlight_pill_y(&l.galley, seg_s, seg_e, gh);
+                        let pad_x = (gh * 0.12).clamp(1.5, 4.0);
+                        let x0 = ox + glyphs[seg_s].pos.x - pad_x;
+                        let x1 = ox + glyphs[seg_e - 1].pos.x + glyphs[seg_e - 1].advance_width + pad_x;
+                        let radius = ((hy1 - hy0) * 0.22).clamp(2.5, 5.5);
+                        draw_gradient_pill(&mut surface, c1, c2, x0, oy + hy0, (x1 - x0).max(1.0), (hy1 - hy0).max(1.0), radius);
+                        continue;
+                    }
+                    hk += 1;
+                }
+
+                // Tab leaders
+                for (r, rad, c) in layout::leader_marks(l) {
+                    draw_gradient_pill(&mut surface, c, c, ox + r.min.x, oy + r.min.y, r.width(), r.height(), rad);
+                }
+
+                // Resolve per-character colors (handling Craft left-to-right gradient text, links, checklists)
+                let checked_checklist = pfmt.list == ListKind::Checklist && pfmt.checked;
+                let mut char_colors: Vec<[u8; 3]> = (0..n)
+                    .map(|i| {
+                        let s = para.styles[l.start + i];
+                        if s.link > 0 && s.color == [0, 0, 0] {
+                            [11, 87, 208]
+                        } else if checked_checklist && s.color == [0, 0, 0] {
+                            [110, 118, 129]
+                        } else {
+                            s.color
+                        }
+                    })
+                    .collect();
+                let mut gk = 0;
+                while gk < n {
+                    let st = para.styles[l.start + gk];
+                    if let Some(c2) = st.color_to {
+                        if c2 != st.color {
+                            let c1 = st.color;
+                            let gs = gk;
+                            gk += 1;
+                            while gk < n && para.styles[l.start + gk].color == c1 && para.styles[l.start + gk].color_to == Some(c2) {
+                                gk += 1;
+                            }
+                            let ge = gk;
+                            let span = (ge - gs).saturating_sub(1).max(1) as f32;
+                            for (idx, dst) in char_colors[gs..ge].iter_mut().enumerate() {
+                                *dst = lerp_rgb(c1, c2, idx as f32 / span);
+                            }
+                            continue;
+                        }
+                    }
+                    gk += 1;
+                }
+
+                // Draw text runs using real embedded subsetted TTF/OTF fonts
+                let mut k = 0;
+                while k < n {
+                    let s = para.styles[l.start + k];
+                    let col = char_colors[k];
+                    if glyphs[k].chr.is_whitespace() {
+                        k += 1;
+                        continue;
+                    }
+                    let start = k;
+                    let mut word = String::new();
+                    while k < n && !glyphs[k].chr.is_whitespace() && para.styles[l.start + k] == s && char_colors[k] == col {
+                        word.push(glyphs[k].chr);
+                        k += 1;
+                    }
+                    let g0 = &glyphs[start];
+                    let mut size = s.size.max(1.0);
+                    let mut base_y = oy + g0.pos.y;
+                    if s.caps == 2 && para.text.get(l.start + start).is_some_and(|c| c.is_lowercase()) {
+                        size *= 0.8;
+                    }
+                    if s.script != 0 {
+                        size *= 0.65;
+                        if s.script > 0 {
+                            base_y -= s.size * 0.33;
+                        } else {
+                            base_y += s.size * 0.12;
+                        }
+                    }
+                    if let Some(fnt) = fonts.get(s.font, s.bold, s.italic) {
+                        surface.set_stroke(None);
+                        surface.set_fill(Some(fill_solid(col)));
+                        surface.draw_text(
+                            Point::from_xy(ox + g0.pos.x, base_y),
+                            fnt,
+                            size,
+                            &word,
+                            false,
+                            TextDirection::Auto,
+                        );
+                    }
+                    if s.link > 0 {
+                        if let Some(url) = doc.link_url(s.link) {
+                            let gx0 = ox + g0.pos.x;
+                            let gx1 = ox + glyphs[k - 1].pos.x + glyphs[k - 1].advance_width;
+                            if let Some(r) = KRect::from_ltrb(gx0, oy, gx1.max(gx0 + 1.0), oy + l.height) {
+                                page_links.push((r, url.to_string()));
+                            }
+                        }
+                    }
+                }
+
+                // Underline and strikethrough bars
+                let mut uk = 0;
+                while uk < n {
+                    let s = para.styles[l.start + uk];
+                    let col = char_colors[uk];
+                    let has_ul = s.underline || s.link > 0;
+                    let has_st = s.strike || checked_checklist;
+                    if !has_ul && !has_st {
+                        uk += 1;
+                        continue;
+                    }
+                    let start = uk;
+                    while uk < n
+                        && (para.styles[l.start + uk].underline || para.styles[l.start + uk].link > 0) == has_ul
+                        && (para.styles[l.start + uk].strike || checked_checklist) == has_st
+                        && char_colors[uk] == col
+                    {
+                        uk += 1;
+                    }
+                    let mut end = uk;
+                    while end > start + 1 && glyphs[end - 1].chr.is_whitespace() {
+                        end -= 1;
+                    }
+                    let x0 = ox + glyphs[start].pos.x;
+                    let x1 = ox + glyphs[end - 1].pos.x + glyphs[end - 1].advance_width;
+                    let base_y = oy + glyphs[start].pos.y;
+                    let t = (s.size / 16.0).max(0.5);
+                    if has_ul {
+                        draw_rect(&mut surface, col, x0, base_y + s.size * 0.11, (x1 - x0).max(0.5), t);
+                    }
+                    if has_st {
+                        draw_rect(&mut surface, col, x0, base_y - s.size * 0.28 - t * 0.5, (x1 - x0).max(0.5), t);
+                    }
+                }
+
+                // Checklist checkbox or bullet/number marker
+                if pfmt.list == ListKind::Checklist && l.first_in_para {
+                    let bs = 9.5f32;
+                    let bx = lay.content_offset.x + l.marker_x;
+                    let by = oy + (gh - bs) * 0.5;
+                    let rad = 2.0f32;
+                    if pfmt.checked {
+                        draw_gradient_pill(&mut surface, [43, 87, 151], [43, 87, 151], bx, by, bs, bs, rad);
+                        let mut pb = PathBuilder::new();
+                        pb.move_to(bx + bs * 0.22, by + bs * 0.52);
+                        pb.line_to(bx + bs * 0.44, by + bs * 0.74);
+                        pb.line_to(bx + bs * 0.78, by + bs * 0.28);
+                        if let Some(p) = pb.finish() {
+                            surface.set_fill(None);
+                            surface.set_stroke(Some(KStroke {
+                                paint: kcolor([255, 255, 255]).into(),
+                                width: 1.3,
+                                ..Default::default()
+                            }));
+                            surface.draw_path(&p);
+                        }
+                    } else if let Some(p) = rounded_rect_path(bx, by, bs, bs, rad) {
+                        surface.set_fill(None);
+                        surface.set_stroke(Some(KStroke {
+                            paint: kcolor([115, 115, 115]).into(),
+                            width: 1.0,
+                            ..Default::default()
+                        }));
+                        surface.draw_path(&p);
+                    }
+                } else if let Some(m) = &l.marker {
+                    if let Some(mrow) = m.rows.first() {
+                        let s = para.style_at(0);
+                        let txt: String = mrow.row.glyphs.iter().map(|g| g.chr).collect();
+                        let base_y = oy + mrow.row.glyphs.first().map_or(gh * 0.8, |g| g.pos.y);
+                        let mx = lay.content_offset.x + l.marker_x;
+                        if let Some(fnt) = fonts.get(s.font, false, false) {
+                            surface.set_stroke(None);
+                            surface.set_fill(Some(fill_solid(s.color)));
+                            surface.draw_text(
+                                Point::from_xy(mx, base_y),
+                                fnt,
+                                s.size.max(1.0),
+                                &txt,
+                                false,
+                                TextDirection::Auto,
+                            );
+                        }
+                    }
+                }
             }
-            if !foot.is_empty() {
+
+            // 4. Header & Footer
+            if let Some(hg) = &header_galley {
+                let st = layout::hf_style(doc, false);
+                let hw = hg.rect.width();
+                let hx = match doc.header_align {
+                    Align::Left | Align::Justify => lay.content_offset.x,
+                    Align::Center => (pw - hw) * 0.5,
+                    Align::Right => (lay.content_offset.x + lay.content_size.x - hw).max(lay.content_offset.x),
+                };
+                let top = layout::hf_y(doc, &lay, false, hg.rect.height());
+                if let Some(fnt) = fonts.get(st.font, st.bold, st.italic) {
+                    surface.set_stroke(None);
+                    surface.set_fill(Some(fill_solid(st.color)));
+                    surface.draw_text(
+                        Point::from_xy(hx, top + st.size * 0.9),
+                        fnt,
+                        st.size.max(1.0),
+                        &doc.header,
+                        false,
+                        TextDirection::Auto,
+                    );
+                }
+            }
+            if let Some(pf) = doc.resolved_page_footer(page_idx, total_pages) {
+                if let Some((x0, x1, y_bot, w_pt, col)) = pf.rule {
+                    let y_top = ph - y_bot;
+                    draw_rect(&mut surface, col, x0, y_top - w_pt * 0.5, (x1 - x0).max(1.0), w_pt.max(0.5));
+                }
+                for seg in &pf.segments {
+                    let total_txt: String = seg.runs.iter().map(|r| r.text.as_str()).collect();
+                    let dom_size = seg.runs.first().map_or(9.0, |r| r.style.size.max(4.5));
+                    let est_w = total_txt.chars().count() as f32 * dom_size * 0.5;
+                    let mut cur_x = match seg.align {
+                        Align::Center => ((seg.x_pt + seg.max_x_pt) * 0.5 - est_w * 0.5).max(2.0),
+                        Align::Right => (seg.max_x_pt - est_w).max(2.0),
+                        Align::Left | Align::Justify => seg.x_pt.max(2.0),
+                    };
+                    let base_y = ph - seg.bottom_pt.max(2.0);
+                    for run in &seg.runs {
+                        let st = run.style;
+                        let sz = st.size.max(4.5);
+                        if let Some(fnt) = fonts.get(st.font, st.bold, st.italic) {
+                            surface.set_stroke(None);
+                            surface.set_fill(Some(fill_solid(st.color)));
+                            surface.draw_text(
+                                Point::from_xy(cur_x, base_y),
+                                fnt,
+                                sz,
+                                &run.text,
+                                false,
+                                TextDirection::Auto,
+                            );
+                        }
+                        cur_x += run.text.chars().count() as f32 * sz * 0.5;
+                    }
+                }
+            } else if let Some(fg) = &footer_galleys[page_idx] {
+                let mut foot = crate::doc::update_footer_page_nums(&doc.footer, page_idx + 1, total_pages);
+                if pg.page_numbers {
+                    let pn = format!("Page {}", page_idx + 1);
+                    foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
+                }
                 let st = layout::hf_style(doc, true);
-                let fw = approx_width(&foot, st.size);
+                let fw = fg.rect.width();
                 let fx = match doc.footer_align {
                     Align::Left | Align::Justify => lay.content_offset.x,
                     Align::Center => (pw - fw) * 0.5,
                     Align::Right => (lay.content_offset.x + lay.content_size.x - fw).max(lay.content_offset.x),
                 };
-                let top = layout::hf_y(doc, &lay, true, st.size * 1.2);
-                page.text(font_res(&st), st.size, st.color, fx, ph - top - st.size * 0.9, &foot);
-            }
-        }
-    }
-
-    for l in &lay.lines {
-        let para = &doc.paras[l.para];
-        let page = &mut pages[l.page];
-        let ox = lay.content_offset.x + l.x;
-        let oy = lay.content_offset.y + l.y;
-        let Some(row) = l.galley.rows.first() else { continue };
-        let glyphs = &row.row.glyphs;
-        let gh = l.galley.rect.height();
-        let n = (l.end - l.start).min(glyphs.len());
-
-        // Paragraph shading
-        if let Some(sh) = para.fmt.shading {
-            page.rect(sh, lay.content_offset.x - 4.5, ph - (oy + l.height + 0.75), lay.content_size.x + 9.0, l.height + 1.5);
-        }
-
-        // Contiguous highlight pill runs (interpolated across each highlight segment, not the whole line!)
-        let mut hk = 0;
-        while hk < n {
-            let st = para.styles[l.start + hk];
-            if let Some(c1) = st.highlight {
-                let c2 = st.highlight_to.unwrap_or(c1);
-                let seg_s = hk;
-                hk += 1;
-                while hk < n
-                    && para.styles[l.start + hk].highlight == Some(c1)
-                    && para.styles[l.start + hk].highlight_to.unwrap_or(c1) == c2
-                {
-                    hk += 1;
-                }
-                let seg_e = hk;
-                let (hy0, hy1) = layout::highlight_pill_y(&l.galley, seg_s, seg_e, gh);
-                let x0 = ox + glyphs[seg_s].pos.x - 2.2;
-                let x1 = ox + glyphs[seg_e - 1].pos.x + glyphs[seg_e - 1].advance_width + 2.2;
-                page.gradient_pill(c1, c2, x0, ph - (oy + hy1), (x1 - x0).max(1.0), (hy1 - hy0).max(1.0));
-                continue;
-            }
-            hk += 1;
-        }
-
-        // Compute per-character text colors (supporting Craft-style left-to-right gradient text runs)
-        let mut char_colors: Vec<[u8; 3]> = (0..n).map(|i| para.styles[l.start + i].color).collect();
-        let mut gk = 0;
-        while gk < n {
-            let st = para.styles[l.start + gk];
-            if let Some(c2) = st.color_to {
-                if c2 != st.color {
-                    let c1 = st.color;
-                    let gs = gk;
-                    gk += 1;
-                    while gk < n && para.styles[l.start + gk].color == c1 && para.styles[l.start + gk].color_to == Some(c2) {
-                        gk += 1;
-                    }
-                    let ge = gk;
-                    let span = (ge - gs).saturating_sub(1).max(1) as f32;
-                    for (idx, dst) in char_colors[gs..ge].iter_mut().enumerate() {
-                        *dst = lerp_rgb(c1, c2, idx as f32 / span);
-                    }
-                    continue;
+                let top = layout::hf_y(doc, &lay, true, fg.rect.height());
+                if let Some(fnt) = fonts.get(st.font, st.bold, st.italic) {
+                    surface.set_stroke(None);
+                    surface.set_fill(Some(fill_solid(st.color)));
+                    surface.draw_text(
+                        Point::from_xy(fx, top + st.size * 0.9),
+                        fnt,
+                        st.size.max(1.0),
+                        &foot,
+                        false,
+                        TextDirection::Auto,
+                    );
                 }
             }
-            gk += 1;
-        }
 
-        // Words: runs of non-space glyphs with the same style & resolved color
-        let mut k = 0;
-        while k < n {
-            let s = para.styles[l.start + k];
-            let col = char_colors[k];
-            if glyphs[k].chr.is_whitespace() {
-                k += 1;
-                continue;
-            }
-            let start = k;
-            let mut word = String::new();
-            while k < n && !glyphs[k].chr.is_whitespace() && para.styles[l.start + k] == s && char_colors[k] == col {
-                word.push(glyphs[k].chr);
-                k += 1;
-            }
-            let g0 = &glyphs[start];
-            let mut size = s.size;
-            let mut base = oy + g0.pos.y;
-            if s.script != 0 {
-                size *= 0.65;
-                if s.script > 0 {
-                    base -= s.size * 0.33;
-                } else {
-                    base += s.size * 0.12;
-                }
-            }
-            page.text(font_res(&s), size, col, ox + g0.pos.x, ph - base, &word);
+            surface.finish();
         }
-
-        // Underline and strikethrough bars
-        let mut k = 0;
-        while k < n {
-            let s = para.styles[l.start + k];
-            let col = char_colors[k];
-            if !(s.underline || s.strike) {
-                k += 1;
-                continue;
-            }
-            let start = k;
-            while k < n
-                && para.styles[l.start + k].underline == s.underline
-                && para.styles[l.start + k].strike == s.strike
-                && char_colors[k] == col
-            {
-                k += 1;
-            }
-            let mut end = k;
-            while end > start + 1 && glyphs[end - 1].chr.is_whitespace() {
-                end -= 1;
-            }
-            let x0 = ox + glyphs[start].pos.x;
-            let x1 = ox + glyphs[end - 1].pos.x + glyphs[end - 1].advance_width;
-            let base = oy + glyphs[start].pos.y;
-            let t = (s.size / 16.0).max(0.5);
-            if s.underline {
-                page.rect(col, x0, ph - (base + s.size * 0.12) - t, x1 - x0, t);
-            }
-            if s.strike {
-                page.rect(col, x0, ph - (base - s.size * 0.28) - t / 2.0, x1 - x0, t);
-            }
+        for (rect, url) in page_links {
+            page.add_annotation(Annotation::new_link(
+                LinkAnnotation::new(rect, Target::Action(Action::Link(LinkAction::new(url)))),
+                None,
+            ));
         }
-
-        // Bullet or number marker
-        if let Some(m) = &l.marker {
-            if let Some(mrow) = m.rows.first() {
-                let s = para.style_at(0);
-                let txt: String = mrow.row.glyphs.iter().map(|g| g.chr).collect();
-                let base = oy + mrow.row.glyphs.first().map_or(gh * 0.8, |g| g.pos.y);
-                let mx = lay.content_offset.x + l.marker_x;
-                page.text(font_res(&CharStyle { bold: false, italic: false, ..s }), s.size, s.color, mx, ph - base, &txt);
-            }
-        }
-        let _ = ListKind::None;
+        page.finish();
     }
 
-    // Overlay the high-DPI WYSIWYG rasterized page image XObject (`/Im1 Do`) so visual appearance
-    // in PDF viewers and CUPS printers is 100% identical to the screen while keeping the vector
-    // text layer underneath selectable and searchable.
-    for page in &mut pages {
-        if page.image.is_some() {
-            page.push(&format!("q {pw:.2} 0 0 {ph:.2} 0 0 cm /Im1 Do Q\n"));
-        }
+    if has_outline {
+        kdoc.set_outline(outline);
     }
 
-    if let Some((first_1, last_1)) = page_range {
-        let total = pages.len().max(1);
-        let s = first_1.saturating_sub(1).min(total - 1);
-        let e = last_1.clamp(1, total);
-        if s < e {
-            pages = pages.into_iter().skip(s).take(e - s).collect();
-        }
-    }
-
-    write_pdf(&pages, pw, ph, &doc.info.title, &doc.info.author)
+    kdoc.finish().unwrap_or_default()
 }
 
-fn write_pdf(pages: &[Page], pw: f32, ph: f32, title: &str, author: &str) -> Vec<u8> {
-    let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
-    let mut offsets: Vec<usize> = Vec::new();
-    let n_fonts = 12;
-    // Object numbers:
-    // 1: Catalog, 2: Pages, 3: Info, 4: CalRGB sRGB ColorSpace, 5..17: 12 standard fonts,
-    // then per page (3 objects): Page, Content stream, Image XObject.
-    let cs_obj = 4;
-    let font0 = 5;
-    let page0 = font0 + n_fonts;
-    let stride = 3;
-    let obj = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &[u8]| {
-        offsets.push(out.len());
-        let num = offsets.len();
-        out.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    };
-    obj(&mut out, &mut offsets, b"<< /Type /Catalog /Pages 2 0 R >>");
-    let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", page0 + i * stride)).collect();
-    obj(&mut out, &mut offsets, format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()).as_bytes());
-    let mut info = b"<< /Producer (Syllabary) ".to_vec();
-    if !title.is_empty() {
-        info.extend_from_slice(b"/Title ");
-        info.extend_from_slice(&pdf_string(title));
-    }
-    if !author.is_empty() {
-        info.extend_from_slice(b" /Author ");
-        info.extend_from_slice(&pdf_string(author));
-    }
-    info.extend_from_slice(b" >>");
-    obj(&mut out, &mut offsets, &info);
-    // Object 4: Calibrated IEC 61966-2-1 sRGB color space
-    obj(
-        &mut out,
-        &mut offsets,
-        b"[/CalRGB << /WhitePoint [0.9505 1.0 1.0890] /Gamma [2.2 2.2 2.2] /Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505] >>]",
-    );
-    for fam in FAMILIES {
-        for name in fam {
-            obj(&mut out, &mut offsets, format!("<< /Type /Font /Subtype /Type1 /BaseFont /{name} /Encoding /WinAnsiEncoding >>").as_bytes());
-        }
-    }
-    let fonts: Vec<String> = (0..n_fonts).map(|i| format!("/F{} {} 0 R", i + 1, font0 + i)).collect();
-    for (i, p) in pages.iter().enumerate() {
-        let content_num = page0 + i * stride + 1;
-        let img_num = page0 + i * stride + 2;
-        obj(
-            &mut out,
-            &mut offsets,
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] /Resources << /ColorSpace << /DefaultRGB {cs_obj} 0 R /CSRGB {cs_obj} 0 R >> /Font << {} >> /XObject << /Im1 {img_num} 0 R >> >> /Contents {content_num} 0 R >>",
-                fonts.join(" ")
-            )
-            .as_bytes(),
-        );
-        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&p.ops, 6);
-        let mut body = format!("<< /Length {} /Filter /FlateDecode >>\nstream\n", packed.len()).into_bytes();
-        body.extend_from_slice(&packed);
-        body.extend_from_slice(b"\nendstream");
-        obj(&mut out, &mut offsets, &body);
+// ── Pixel-Accurate PDF Rendering via hayro (ArtCraft PdfCraft engine) ──
 
-        if let Some((iw, ih, ref rgb_bytes)) = p.image {
-            let packed_img = miniz_oxide::deflate::compress_to_vec_zlib(rgb_bytes, 6);
-            let mut img_body = format!(
-                "<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} /ColorSpace {cs_obj} 0 R /BitsPerComponent 8 /Interpolate true /Filter /FlateDecode /Length {} >>\nstream\n",
-                packed_img.len()
-            )
-            .into_bytes();
-            img_body.extend_from_slice(&packed_img);
-            img_body.extend_from_slice(b"\nendstream");
-            obj(&mut out, &mut offsets, &img_body);
-        } else {
-            obj(&mut out, &mut offsets, b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\n\xff\xff\xff\nendstream");
-        }
-    }
-    let xref = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
-    for o in &offsets {
-        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).as_bytes());
-    out
+/// Returns the number of pages and `(width_pt, height_pt)` of each page in a raw PDF file.
+pub fn hayro_pdf_info(pdf_bytes: Arc<Vec<u8>>) -> Option<Vec<(f32, f32)>> {
+    let pdf = hayro::hayro_syntax::Pdf::new(pdf_bytes).ok()?;
+    Some(pdf.pages().iter().map(|p| p.render_dimensions()).collect())
+}
+
+/// Renders a single page (`0`-based `page_idx`) of a raw PDF to `(width, height, unpremultiplied_rgba)`
+/// using `hayro` (pure-Rust ISO 32000 PDF interpreter & `vello_cpu` rasterizer).
+pub fn hayro_render_page_rgba(
+    pdf_bytes: Arc<Vec<u8>>,
+    page_idx: usize,
+    scale: f32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let pdf = hayro::hayro_syntax::Pdf::new(pdf_bytes).ok()?;
+    let page = pdf.pages().get(page_idx)?;
+    let cache = hayro::RenderCache::new();
+    let interp = hayro::hayro_interpret::InterpreterSettings::default();
+    let rset = hayro::RenderSettings::default();
+    let pset = hayro::PixmapSettings {
+        x_scale: scale.clamp(0.25, 4.0),
+        y_scale: scale.clamp(0.25, 4.0),
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+    };
+    let pixmap = hayro::render(page, &cache, &interp, &rset, &pset);
+    let w = pixmap.width() as u32;
+    let h = pixmap.height() as u32;
+    // With opaque WHITE bg_color every pixel has alpha = 255, so premultiplied == unpremultiplied RGBA.
+    let rgba = pixmap.data_as_u8_slice().to_vec();
+    Some((w, h, rgba))
 }
 
 #[cfg(test)]
@@ -1089,7 +1365,11 @@ mod tests {
     #[test]
     fn pdf_is_well_formed() {
         let ctx = egui::Context::default();
-        let book = FontBook::default();
+        let mut book = FontBook::default();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            book = crate::fonts::install(&ctx);
+        });
+        out.textures_delta.clear();
         let mut doc = Document::default();
         doc.insert_text(Pos::new(0, 0), &"Hello (world) – “quotes” ".repeat(300), CharStyle { underline: true, ..Default::default() });
         doc.page.page_numbers = true;
@@ -1098,14 +1378,15 @@ mod tests {
             bytes = export(&ctx, &doc, &book);
         });
         out.textures_delta.clear();
+        assert!(bytes.starts_with(b"%PDF-1."), "krilla emits valid PDF header");
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.starts_with("%PDF-1.4"));
-        assert!(s.trim_end().ends_with("%%EOF"));
-        assert!(s.contains("/Count 2") || s.contains("/Count 3"), "several pages");
-        assert!(s.contains("/CalRGB"), "calibrated sRGB color space");
-        let x = s.rfind("startxref").unwrap();
-        let xref: usize = s[x + 10..].lines().next().unwrap().trim().parse().unwrap();
-        assert!(bytes[xref..].starts_with(b"xref"));
+        assert!(s.trim_end().ends_with("%%EOF"), "valid PDF EOF");
+        // Verify with hayro that the exported vector PDF renders cleanly with multiple pages
+        let arc_bytes = Arc::new(bytes);
+        let info = hayro_pdf_info(arc_bytes.clone()).expect("hayro parses krilla PDF");
+        assert!(info.len() >= 2, "expected multiple pages, got {}", info.len());
+        let (w, h, rgba) = hayro_render_page_rgba(arc_bytes, 0, 1.0).expect("hayro renders page 0");
+        assert!(w > 400 && h > 500 && rgba.len() == (w as usize) * (h as usize) * 4);
     }
 
     #[test]

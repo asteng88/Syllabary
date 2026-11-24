@@ -4540,6 +4540,7 @@ fn detect_page_tables(
                 cells: cells_spec,
                 min_height_pt: min_h,
                 grid_after: 0,
+                    ..TableRowSpec::default()
             });
         }
 
@@ -5083,6 +5084,7 @@ fn detect_hrule_and_zebra_tables(
                 cells: cells_spec,
                 min_height_pt: (row_h * 0.88).clamp(10.0, 96.0),
                 grid_after: 0,
+                    ..TableRowSpec::default()
             });
         }
 
@@ -6007,6 +6009,7 @@ fn build_side_by_side_media_tables(
                             cells,
                             min_height_pt: (band_top - band_bot).clamp(12.0, 180.0),
                             grid_after: 0,
+                    ..TableRowSpec::default()
                         }],
                         indent_in: 0.0,
                     },
@@ -6094,6 +6097,7 @@ fn build_side_by_side_media_tables(
                         cells,
                         min_height_pt: (gy1 - gy0).clamp(12.0, 360.0),
                         grid_after: 0,
+                    ..TableRowSpec::default()
                     }],
                     indent_in: 0.0,
                 },
@@ -6236,6 +6240,7 @@ fn build_side_by_side_media_tables(
                         cells,
                         min_height_pt: (band_top - band_bot).clamp(12.0, 180.0),
                         grid_after: 0,
+                    ..TableRowSpec::default()
                     }],
                     indent_in: 0.0,
                 },
@@ -6478,6 +6483,7 @@ fn pair_two_column_text_blocks(
                     cells,
                     min_height_pt: 0.0,
                     grid_after: 0,
+                    ..TableRowSpec::default()
                 }],
                 indent_in: 0.0,
             },
@@ -6833,6 +6839,7 @@ fn build_borderless_multicol_table(
             cells,
             min_height_pt: min_h,
             grid_after: 0,
+                    ..TableRowSpec::default()
         });
     }
 

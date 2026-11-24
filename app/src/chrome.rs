@@ -118,10 +118,8 @@ impl App {
         let open_comments = self.tab_ref().doc.comments.iter().filter(|c| !c.resolved).count();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let (logo_r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-            icons::draw(ui.painter(), logo_r, Icon::DocsLogo, th.icon, th.accent);
 
-            // Sculpted Studio Menu Capsule anchored right next to the app icon
+            // Sculpted Studio Menu Capsule
             Frame::new()
                 .fill(th.surface_subtle)
                 .stroke(Stroke::new(1.0, th.border))
@@ -1407,6 +1405,7 @@ impl App {
                 &[
                     ("Search the menus", "Alt+/"),
                     ("Keyboard shortcuts", "Ctrl+/"),
+                    ("Check for Updates…", ""),
                     ("About Syllabary…", ""),
                 ],
             );
@@ -1418,6 +1417,9 @@ impl App {
                 self.act(Action::Dialog(Dialog::Shortcuts));
             }
             ui.separator();
+            if mitem(ui, th, Icon::About, "Check for Updates…", "") {
+                self.act(Action::CheckForUpdates);
+            }
             if mitem(ui, th, Icon::DocsLogo, "About Syllabary…", "") {
                 self.act(Action::Dialog(Dialog::About));
             }
@@ -1814,6 +1816,21 @@ impl App {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(format!("v{}", crate::updater::CURRENT_VERSION))
+                                .size(11.0)
+                                .color(th.subtle),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Click to check GitHub for updates")
+                    .clicked()
+                {
+                    self.act(Action::CheckForUpdates);
+                }
+                sep(ui, th);
                 let pct_txt = format!("{}%", (zoom * 100.0).round() as i32);
                 if ui
                     .add(egui::Button::new(RichText::new(pct_txt).font(FontId::new(12.0, FontFamily::Proportional)).color(th.text)).frame(false))

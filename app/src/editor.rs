@@ -62,6 +62,14 @@ struct LayoutKey {
     fonts_rev: u64,
 }
 
+/// Pixel-accurate PDF page viewer backed by `hayro` (pure-Rust ISO 32000 renderer).
+pub struct PdfExactView {
+    pub bytes: std::sync::Arc<Vec<u8>>,
+    pub page_dims_pt: Vec<(f32, f32)>,
+    pub active: bool,
+    textures: std::collections::HashMap<(usize, u32), egui::TextureHandle>,
+}
+
 pub struct Tab {
     pub id: u64,
     pub doc: Document,
@@ -96,6 +104,7 @@ pub struct Tab {
     resizing_table_col: Option<(u32, usize, usize, f32, f32)>,
     resizing_table_row: Option<(u32, usize, f32, f32)>,
     drag_cell_anchor: Option<(u32, u16, u16)>,
+    pub pdf_view: Option<PdfExactView>,
 }
 
 pub struct ViewOpts<'a> {
@@ -204,6 +213,23 @@ impl Tab {
             resizing_table_col: None,
             resizing_table_row: None,
             drag_cell_anchor: None,
+            pdf_view: None,
+        }
+    }
+
+    /// Attaches raw PDF bytes for pixel-accurate `hayro` rendering, with one-click switching
+    /// between Exact PDF View and Editable Reflow Mode.
+    pub fn attach_pdf_exact_view(&mut self, bytes: Vec<u8>) {
+        let arc = std::sync::Arc::new(bytes);
+        if let Some(dims) = crate::pdf::hayro_pdf_info(arc.clone()) {
+            if !dims.is_empty() {
+                self.pdf_view = Some(PdfExactView {
+                    bytes: arc,
+                    page_dims_pt: dims,
+                    active: true,
+                    textures: std::collections::HashMap::new(),
+                });
+            }
         }
     }
 
@@ -1419,8 +1445,97 @@ impl Tab {
     }
 
     // ── drawing ─────────────────────────────────────────────
+    /// Renders an opened PDF pixel-accurately via `hayro` (on-demand per visible page),
+    /// with a one-click switch to Editable Reflow Mode.
+    fn show_pdf_exact(&mut self, ui: &mut egui::Ui, opts: &ViewOpts) -> (egui::Response, Option<Rect>) {
+        let mut switch_to_edit = false;
+        let page_count = self.pdf_view.as_ref().map_or(0, |pv| pv.page_dims_pt.len());
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new(format!("Exact PDF View ({page_count} page{})", if page_count == 1 { "" } else { "s" })).strong().small());
+            if ui.small_button("Switch to Editable Document").clicked() {
+                switch_to_edit = true;
+            }
+        });
+        if switch_to_edit {
+            if let Some(pv) = self.pdf_view.as_mut() {
+                pv.active = false;
+            }
+        }
+
+        let avail_w = ui.available_width();
+        let px_per_pt = (layout::BASE_PPI / 72.0) * opts.zoom;
+        let ppp = ui.ctx().pixels_per_point();
+        let raster_scale = (px_per_pt * ppp).clamp(0.5, 4.0);
+        let scale_key = (raster_scale * 100.0).round() as u32;
+
+        let mut total_h = PAGE_GAP;
+        let mut max_w = avail_w;
+        let mut page_rects: Vec<(usize, Vec2, f32)> = Vec::new();
+        if let Some(pv) = &self.pdf_view {
+            for (idx, &(w_pt, h_pt)) in pv.page_dims_pt.iter().enumerate() {
+                let sz = vec2(w_pt * px_per_pt, h_pt * px_per_pt);
+                max_w = max_w.max(sz.x + PAGE_GAP * 2.0);
+                page_rects.push((idx, sz, total_h));
+                total_h += sz.y + PAGE_GAP;
+            }
+        }
+
+        let (canvas, resp) = ui.allocate_exact_size(vec2(max_w, total_h.max(200.0)), Sense::click());
+        self.canvas_x0 = canvas.min.x;
+        self.canvas_w = canvas.width();
+        let clip = ui.clip_rect();
+        let painter = ui.painter();
+
+        if let Some(pv) = self.pdf_view.as_mut() {
+            // Evict textures from previous zoom levels to keep GPU memory bounded
+            pv.textures.retain(|&(_, sk), _| sk == scale_key);
+            for (idx, sz, top_y) in page_rects {
+                let x = canvas.min.x + ((canvas.width() - sz.x) * 0.5).max(PAGE_GAP);
+                let rect = Rect::from_min_size(pos2(x, canvas.min.y + top_y), sz);
+                if !rect.intersects(clip.expand(sz.y * 0.5)) {
+                    continue;
+                }
+                // Soft page drop shadow
+                painter.rect_filled(rect.translate(vec2(2.0, 3.0)), 2.0, Color32::from_black_alpha(28));
+                painter.rect_filled(rect, 0.0, Color32::WHITE);
+
+                let tex = pv.textures.entry((idx, scale_key)).or_insert_with(|| {
+                    let (rw, rh, rgba) = crate::pdf::hayro_render_page_rgba(pv.bytes.clone(), idx, raster_scale)
+                        .unwrap_or((1, 1, vec![255, 255, 255, 255]));
+                    let img = egui::ColorImage::from_rgba_unmultiplied([rw as usize, rh as usize], &rgba);
+                    ui.ctx().load_texture(
+                        format!("pdf_exact_{}_{}_{}", self.id, idx, scale_key),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+                painter.image(
+                    tex.id(),
+                    rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_gray(205)), StrokeKind::Outside);
+            }
+        }
+        (resp, None)
+    }
+
     /// Draws the pages and handles mouse input. Returns the caret's screen rect.
     pub fn show(&mut self, ui: &mut egui::Ui, opts: &ViewOpts, focus_id: egui::Id, cmds: &mut Vec<Cmd>) -> (egui::Response, Option<Rect>) {
+        if self.pdf_view.as_ref().is_some_and(|pv| pv.active) {
+            return self.show_pdf_exact(ui, opts);
+        }
+        if let Some(pv) = self.pdf_view.as_mut() {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                if ui.small_button("View Exact PDF").clicked() {
+                    pv.active = true;
+                }
+                ui.label(egui::RichText::new("Editing reconstructed document").weak().small());
+            });
+        }
         let lay = self.layout(ui.ctx(), opts);
         let avail_w = ui.available_width();
         let size = lay.canvas_size(avail_w);

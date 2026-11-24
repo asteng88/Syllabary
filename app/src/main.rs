@@ -20,9 +20,22 @@ mod icons;
 mod layout;
 mod scrollbar;
 mod theme;
+mod updater;
 
 use eframe::egui;
 use std::path::PathBuf;
+
+/// Loads the embedded 256×256 RGBA Syllabary squircle icon for the window titlebar and taskbar/dock.
+fn load_app_icon() -> Option<egui::IconData> {
+    const PNG: &[u8] = include_bytes!("../assets/icons/syllabary_256.png");
+    let img = image::load_from_memory(PNG).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
+}
 
 fn main() -> eframe::Result<()> {
     let mut screenshot: Option<PathBuf> = None;
@@ -46,12 +59,16 @@ fn main() -> eframe::Result<()> {
 
     // Same proportions as the original's maximised window (1899 × 1132).
     let size = if screenshot.is_some() { [1600.0, 954.0] } else { [1440.0, 900.0] };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(format!("Syllabary v{} - [Untitled1]", updater::CURRENT_VERSION))
+        .with_inner_size(size)
+        .with_maximized(true)
+        .with_min_inner_size([720.0, 480.0]);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Syllabary - [Untitled1]")
-            .with_inner_size(size)
-            .with_maximized(true)
-            .with_min_inner_size([720.0, 480.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

@@ -431,6 +431,15 @@ fn write_para_xml(
     if f.page_break_before {
         body.push_str("<w:pageBreakBefore/>");
     }
+    if f.keep_next {
+        body.push_str("<w:keepNext/>");
+    }
+    if f.keep_lines {
+        body.push_str("<w:keepLines/>");
+    }
+    if f.widow_control {
+        body.push_str("<w:widowControl/>");
+    }
     // numbering
     let mut list_ext = String::new();
     if f.list != ListKind::None {
@@ -753,8 +762,18 @@ pub fn write(doc: &Document) -> Vec<u8> {
                 body.push_str("</w:tblGrid>");
                 for (r_idx, row_spec) in tbl.rows.iter().enumerate() {
                     body.push_str("<w:tr>");
-                    if row_spec.grid_after > 0 || row_spec.min_height_pt > 0.0 {
+                    if row_spec.grid_after > 0
+                        || row_spec.min_height_pt > 0.0
+                        || row_spec.cant_split
+                        || row_spec.is_header
+                    {
                         body.push_str("<w:trPr>");
+                        if row_spec.cant_split {
+                            body.push_str("<w:cantSplit/>");
+                        }
+                        if row_spec.is_header {
+                            body.push_str("<w:tblHeader/>");
+                        }
                         if row_spec.grid_after > 0 {
                             body.push_str(&format!(
                                 "<w:gridAfter w:val=\"{}\"/>",
@@ -1470,6 +1489,9 @@ fn apply_ppr(fmt: &mut ParaFmt, ex: &mut PExtra, n: &str, a: &Attrs, in_pbdr: bo
         "w:left" | "w:start" if in_pbdr => fmt.pborders.left = parse_border(a),
         "w:right" | "w:end" if in_pbdr => fmt.pborders.right = parse_border(a),
         "w:pageBreakBefore" => fmt.page_break_before = on(a),
+        "w:keepNext" => fmt.keep_next = on(a),
+        "w:keepLines" => fmt.keep_lines = on(a),
+        "w:widowControl" => fmt.widow_control = on(a),
         _ => {}
     }
 }
@@ -2096,6 +2118,8 @@ struct PendingRow {
     cells: Vec<PendingCell>,
     min_height_pt: f32,
     grid_after: u16,
+    cant_split: bool,
+    is_header: bool,
 }
 
 struct CurTable {
@@ -2226,6 +2250,8 @@ impl CurTable {
                 cells: final_cells,
                 min_height_pt: prow.min_height_pt,
                 grid_after: prow.grid_after,
+                cant_split: prow.cant_split,
+                is_header: prow.is_header,
             });
         }
         DocTable {
@@ -2697,6 +2723,20 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
                             if let Some(v) = num(&a, "w:val") {
                                 r.min_height_pt = (v / 20.0).max(0.0);
                             }
+                        }
+                    }
+                }
+                "w:cantSplit" if cur_tbl.as_ref().is_some_and(|tb| tb.in_tr_pr) => {
+                    if let Some(tb) = cur_tbl.as_mut() {
+                        if let Some(r) = tb.cur_row.as_mut() {
+                            r.cant_split = on(&a);
+                        }
+                    }
+                }
+                "w:tblHeader" if cur_tbl.as_ref().is_some_and(|tb| tb.in_tr_pr) => {
+                    if let Some(tb) = cur_tbl.as_mut() {
+                        if let Some(r) = tb.cur_row.as_mut() {
+                            r.is_header = on(&a);
                         }
                     }
                 }
@@ -3872,5 +3912,61 @@ mod tests {
             assert!((back.header_dist_in - 0.4).abs() < 0.01);
             assert!((back.footer_dist_in - 0.3).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn pagination_flags_roundtrip_docx_and_gdoc_and_enforce_keep_next() {
+        let mut doc = Document::default();
+        for i in 0..42 {
+            let mut p = Para::new(CharStyle::default(), ParaFmt { space_after: 4.0, ..ParaFmt::default() });
+            for c in format!("Body line {i} filling page one.").chars() {
+                p.text.push(c);
+                p.styles.push(CharStyle::default());
+            }
+            doc.paras.push(p);
+        }
+        let mut hdr = Para::new(
+            CharStyle { size: 16.0, bold: true, ..CharStyle::default() },
+            ParaFmt { style: 4, keep_next: true, keep_lines: true, widow_control: true, ..ParaFmt::default() },
+        );
+        for c in "Kept Heading".chars() {
+            hdr.text.push(c);
+            hdr.styles.push(CharStyle { size: 16.0, bold: true, ..CharStyle::default() });
+        }
+        doc.paras.push(hdr);
+        let mut body = Para::new(CharStyle::default(), ParaFmt::default());
+        for c in "First paragraph under kept heading.".chars() {
+            body.text.push(c);
+            body.styles.push(CharStyle::default());
+        }
+        doc.paras.push(body);
+
+        let docx_back = read(&write(&doc)).expect("docx roundtrip");
+        let h_idx = docx_back.paras.iter().position(|p| p.string() == "Kept Heading").expect("heading present");
+        assert!(docx_back.paras[h_idx].fmt.keep_next);
+        assert!(docx_back.paras[h_idx].fmt.keep_lines);
+        assert!(docx_back.paras[h_idx].fmt.widow_control);
+
+        let gdoc_back = crate::doc::from_gdoc(&crate::doc::to_gdoc(&doc)).expect("gdoc roundtrip");
+        let gh_idx = gdoc_back.paras.iter().position(|p| p.string() == "Kept Heading").expect("gdoc heading present");
+        assert!(gdoc_back.paras[gh_idx].fmt.keep_next);
+        assert!(gdoc_back.paras[gh_idx].fmt.keep_lines);
+        assert!(gdoc_back.paras[gh_idx].fmt.widow_control);
+
+        let ctx = eframe::egui::Context::default();
+        let mut book = crate::fonts::FontBook::default();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            book = crate::fonts::install(&ctx);
+        });
+        out.textures_delta.clear();
+        let mut lay_pages = (0usize, 0usize);
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            let lay = crate::layout::build(&ctx, &docx_back, &book, 1.0, false);
+            let hl = lay.lines.iter().find(|l| l.para == h_idx).expect("heading line");
+            let bl = lay.lines.iter().find(|l| l.para == h_idx + 1).expect("body line");
+            lay_pages = (hl.page, bl.page);
+        });
+        out.textures_delta.clear();
+        assert_eq!(lay_pages.0, lay_pages.1, "keep_next must keep heading on the same page as its following paragraph");
     }
 }
