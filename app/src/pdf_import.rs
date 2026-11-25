@@ -3101,6 +3101,202 @@ struct PageItem {
     kind: PageItemKind,
 }
 
+/// An editable text block extracted from a PDF page (or newly added by the user)
+/// in top-down PDF point coordinates `(x_pt, y_pt, w_pt, h_pt)` relative to page top-left.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfTextBlock {
+    pub id: u64,
+    pub page: usize,
+    pub x_pt: f32,
+    pub y_pt: f32,
+    /// Original position & width in PDF top-down points (used to patch the original text if moved/resized).
+    pub orig_x_pt: f32,
+    pub orig_y_pt: f32,
+    pub orig_w_pt: f32,
+    pub w_pt: f32,
+    pub h_pt: f32,
+    pub original_text: String,
+    pub text: String,
+    pub font: u16,
+    pub size_pt: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub align: Align,
+    pub color: [u8; 3],
+    pub bg_color: [u8; 3],
+    pub deleted: bool,
+    pub is_added: bool,
+    pub modified: bool,
+}
+
+/// Extracts positioned, editable text blocks from raw PDF bytes for in-place editing
+/// directly over the exact `hayro` page rendering.
+pub fn extract_editable_blocks(data: &[u8]) -> Result<Vec<PdfTextBlock>, String> {
+    let pdf = PdfDoc::open(data)?;
+    let root_obj = pdf
+        .trailer
+        .get("Root")
+        .ok_or("Missing PDF /Root catalog.")?;
+    let root = pdf.resolve(root_obj);
+    let root_dict = root.as_dict().ok_or("Invalid PDF catalog.")?;
+    let pages_obj = pdf.dict_get(root_dict, "Pages");
+
+    let mut pages = Vec::new();
+    collect_pages(&pdf, &pages_obj, [0.0, 0.0, 612.0, 792.0], BTreeMap::new(), &mut pages);
+    if pages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut is_scribe_export = false;
+    if let Some(info_obj) = pdf.trailer.get("Info") {
+        if let Some(info_dict) = pdf.resolve(info_obj).as_dict() {
+            if let Some(b) = pdf.dict_get(info_dict, "Producer").as_str_bytes() {
+                let prod = decode_pdf_text_string(b);
+                if prod.contains("Syllabary") || prod.contains("Scribe Pro") {
+                    is_scribe_export = true;
+                }
+            }
+        }
+    }
+
+    let mut all_spans = Vec::new();
+    let mut all_images = Vec::new();
+    let mut page_bg = None;
+    let mut page_geoms = Vec::with_capacity(pages.len());
+    for (idx, p) in pages.iter().enumerate() {
+        page_geoms.push(interpret_page(
+            &pdf,
+            idx,
+            p,
+            is_scribe_export,
+            &mut all_spans,
+            &mut all_images,
+            &mut page_bg,
+        ));
+    }
+    let default_bg = page_bg.unwrap_or([255, 255, 255]);
+
+    let mut blocks = Vec::new();
+    let mut next_id = 1u64;
+
+    for (page_idx, page_info) in pages.iter().enumerate() {
+        let mb = page_info.media_box;
+        let geom = &page_geoms[page_idx];
+        let mut spans: Vec<TextSpan> = all_spans
+            .iter()
+            .filter(|s| s.page == page_idx && !s.text.trim().is_empty())
+            .cloned()
+            .collect();
+        if spans.is_empty() {
+            continue;
+        }
+        // Sort top-to-bottom (descending PDF y), then left-to-right (ascending x)
+        spans.sort_by(|a, b| {
+            let y_tol = (a.size.max(b.size) * 0.35).max(2.5);
+            if (a.y - b.y).abs() <= y_tol {
+                a.x.total_cmp(&b.x)
+            } else {
+                b.y.total_cmp(&a.y)
+            }
+        });
+
+        // Merge horizontally adjacent spans on the same baseline into natural editable blocks
+        let mut groups: Vec<Vec<TextSpan>> = Vec::new();
+        for sp in spans {
+            let mut merged = false;
+            if let Some(last_grp) = groups.last_mut() {
+                if let Some(prev) = last_grp.last() {
+                    let y_tol = (prev.size.max(sp.size) * 0.35).max(2.5);
+                    let gap = sp.x - (prev.x + prev.width);
+                    let max_gap = (prev.size.max(sp.size) * 1.6).max(14.0);
+                    if (sp.y - prev.y).abs() <= y_tol && gap >= -prev.size * 0.6 && gap <= max_gap {
+                        last_grp.push(sp.clone());
+                        merged = true;
+                    }
+                }
+            }
+            if !merged {
+                groups.push(vec![sp]);
+            }
+        }
+
+        for mut grp in groups {
+            grp.sort_by(|a, b| a.x.total_cmp(&b.x));
+            let first = &grp[0];
+            let mut text = String::new();
+            let mut min_x = first.x;
+            let mut max_x = first.x + first.width;
+            let mut max_size = first.size;
+            let baseline_y = first.y;
+
+            for (i, sp) in grp.iter().enumerate() {
+                if i > 0 {
+                    let prev = &grp[i - 1];
+                    let gap = sp.x - (prev.x + prev.width);
+                    if gap > sp.size * 0.18 && !text.ends_with(' ') && !sp.text.starts_with(' ') {
+                        text.push(' ');
+                    }
+                }
+                text.push_str(&sp.text);
+                min_x = min_x.min(sp.x);
+                max_x = max_x.max(sp.x + sp.width);
+                max_size = max_size.max(sp.size);
+            }
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Sample background color from enclosing FillRects in PDF user space
+            let mid_x_pdf = (min_x + max_x) * 0.5;
+            let mid_y_pdf = baseline_y + max_size * 0.3;
+            let mut bg = default_bg;
+            for fr in &geom.fill_rects {
+                if mid_x_pdf >= fr.x - 1.0
+                    && mid_x_pdf <= fr.x + fr.w + 1.0
+                    && mid_y_pdf >= fr.y - 1.0
+                    && mid_y_pdf <= fr.y + fr.h + 1.0
+                {
+                    bg = fr.blended_color(bg);
+                }
+            }
+
+            let x_pt = (min_x - mb[0]).max(0.0);
+            let baseline_td = mb[3] - baseline_y;
+            let y_pt = (baseline_td - max_size * 0.88).max(0.0);
+            let w_pt = (max_x - min_x).max(max_size * 0.8);
+            let h_pt = (max_size * 1.25).max(10.0);
+
+            blocks.push(PdfTextBlock {
+                id: next_id,
+                page: page_idx,
+                x_pt,
+                y_pt,
+                orig_x_pt: x_pt,
+                orig_y_pt: y_pt,
+                orig_w_pt: w_pt,
+                w_pt,
+                h_pt,
+                original_text: trimmed.clone(),
+                text: trimmed,
+                font: first.font,
+                size_pt: max_size.clamp(6.0, 96.0),
+                bold: first.bold,
+                italic: first.italic,
+                align: Align::Left,
+                color: first.color,
+                bg_color: bg,
+                deleted: false,
+                is_added: false,
+                modified: false,
+            });
+            next_id += 1;
+        }
+    }
+
+    Ok(blocks)
+}
+
 /// Parses raw PDF bytes into an editable Syllabary `Document`.
 pub fn read(data: &[u8]) -> Result<Document, String> {
     let pdf = PdfDoc::open(data)?;

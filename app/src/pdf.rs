@@ -1357,6 +1357,150 @@ pub fn hayro_render_page_rgba(
     Some((w, h, rgba))
 }
 
+/// Exports an in-place edited PDF via `krilla`: each page embeds the crisp high-DPI
+/// `hayro`-rendered original page, patches over modified/deleted original text blocks
+/// with their sampled background color, and draws real searchable vector text for every
+/// edited or newly added text block.
+pub fn export_edited_pdf(
+    orig_pdf: Arc<Vec<u8>>,
+    page_dims_pt: &[(f32, f32)],
+    blocks: &[crate::pdf_import::PdfTextBlock],
+) -> Result<Vec<u8>, String> {
+    if page_dims_pt.is_empty() {
+        return Err("PDF has no pages to export.".into());
+    }
+    let mut kdoc = krilla::Document::new();
+    kdoc.set_metadata(Metadata::new().producer("Syllabary".to_string()));
+    let mut fonts = FontCache::new();
+
+    for (page_idx, &(pw_raw, ph_raw)) in page_dims_pt.iter().enumerate() {
+        let pw = pw_raw.max(1.0);
+        let ph = ph_raw.max(1.0);
+        let settings = PageSettings::from_wh(pw, ph)
+            .or_else(|| PageSettings::from_wh(612.0, 792.0))
+            .ok_or("Invalid PDF page dimensions.")?;
+        let mut page = kdoc.start_page_with(settings);
+        {
+            let mut surface = page.surface();
+
+            // 1. Crisp high-DPI visual base from the original PDF page
+            if let Some((rw, rh, rgba)) = hayro_render_page_rgba(orig_pdf.clone(), page_idx, 2.5) {
+                let kimg = KImage::from_rgba8(rgba, rw, rh);
+                if let Some(sz) = Size::from_wh(pw, ph) {
+                    surface.draw_image(kimg, sz);
+                }
+            }
+
+            // 2. Clean background patches over modified or deleted original text blocks
+            for b in blocks.iter().filter(|b| b.page == page_idx) {
+                if !b.is_added && (b.modified || b.deleted) {
+                    draw_rect(
+                        &mut surface,
+                        b.bg_color,
+                        (b.orig_x_pt - 1.5).max(0.0),
+                        (b.orig_y_pt - 1.0).max(0.0),
+                        b.orig_w_pt + 3.0,
+                        b.h_pt + 2.0,
+                    );
+                }
+            }
+
+            // 3. Real searchable vector text for edited and newly added blocks (with wrapping & alignment/justify)
+            for b in blocks.iter().filter(|b| b.page == page_idx) {
+                if b.deleted || !(b.modified || b.is_added) || b.text.trim().is_empty() {
+                    continue;
+                }
+                if let Some(fnt) = fonts.get(b.font, b.bold, b.italic) {
+                    surface.set_stroke(None);
+                    surface.set_fill(Some(fill_solid(b.color)));
+                    let sz = b.size_pt.clamp(4.0, 144.0);
+                    let line_h = sz * 1.25;
+                    let max_w = b.w_pt.max(40.0);
+                    let approx_char_w = sz * 0.50;
+                    let approx_space_w = sz * 0.27;
+                    let mut line_idx = 0usize;
+
+                    for para in b.text.split('\n') {
+                        let words: Vec<&str> = para.split_whitespace().collect();
+                        if words.is_empty() {
+                            line_idx += 1;
+                            continue;
+                        }
+                        // Greedy word wrap into lines fitting `max_w`
+                        let mut wrapped: Vec<Vec<&str>> = Vec::new();
+                        let mut cur: Vec<&str> = Vec::new();
+                        let mut cur_w = 0.0f32;
+                        for w in words {
+                            let ww = w.chars().count() as f32 * approx_char_w;
+                            let add_w = if cur.is_empty() { ww } else { approx_space_w + ww };
+                            if !cur.is_empty() && cur_w + add_w > max_w {
+                                wrapped.push(std::mem::take(&mut cur));
+                                cur_w = ww;
+                                cur.push(w);
+                            } else {
+                                cur_w += add_w;
+                                cur.push(w);
+                            }
+                        }
+                        if !cur.is_empty() {
+                            wrapped.push(cur);
+                        }
+
+                        let last_li = wrapped.len().saturating_sub(1);
+                        for (wi, line_words) in wrapped.iter().enumerate() {
+                            let base_y = b.y_pt + sz * 0.88 + (line_idx as f32) * line_h;
+                            let is_last = wi == last_li;
+                            if b.align == Align::Justify && !is_last && line_words.len() >= 2 {
+                                let words_w: f32 = line_words
+                                    .iter()
+                                    .map(|w| w.chars().count() as f32 * approx_char_w)
+                                    .sum();
+                                let gap = ((max_w - words_w) / (line_words.len() - 1) as f32)
+                                    .max(approx_space_w * 0.6);
+                                let mut cx = b.x_pt;
+                                for w in line_words {
+                                    surface.draw_text(
+                                        Point::from_xy(cx, base_y),
+                                        fnt.clone(),
+                                        sz,
+                                        w,
+                                        false,
+                                        TextDirection::Auto,
+                                    );
+                                    cx += w.chars().count() as f32 * approx_char_w + gap;
+                                }
+                            } else {
+                                let line_str = line_words.join(" ");
+                                let est_w = line_str.chars().count() as f32 * approx_char_w;
+                                let lx = match b.align {
+                                    Align::Left | Align::Justify => b.x_pt,
+                                    Align::Center => b.x_pt + ((max_w - est_w) * 0.5).max(0.0),
+                                    Align::Right => b.x_pt + (max_w - est_w).max(0.0),
+                                };
+                                surface.draw_text(
+                                    Point::from_xy(lx, base_y),
+                                    fnt.clone(),
+                                    sz,
+                                    &line_str,
+                                    false,
+                                    TextDirection::Auto,
+                                );
+                            }
+                            line_idx += 1;
+                        }
+                    }
+                }
+            }
+
+            surface.finish();
+        }
+        page.finish();
+    }
+
+    kdoc.finish()
+        .map_err(|e| format!("Failed to finish edited PDF: {e:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1387,6 +1531,81 @@ mod tests {
         assert!(info.len() >= 2, "expected multiple pages, got {}", info.len());
         let (w, h, rgba) = hayro_render_page_rgba(arc_bytes, 0, 1.0).expect("hayro renders page 0");
         assert!(w > 400 && h > 500 && rgba.len() == (w as usize) * (h as usize) * 4);
+    }
+
+    #[test]
+    fn in_place_pdf_edit_extract_and_export_roundtrip() {
+        let ctx = egui::Context::default();
+        let mut book = FontBook::default();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            book = crate::fonts::install(&ctx);
+        });
+        out.textures_delta.clear();
+
+        // 1. Build a clean source PDF with two lines
+        let mut doc = Document::default();
+        doc.insert_text(Pos::new(0, 0), "Quarterly Budget Report", CharStyle::default());
+        doc.split(Pos::new(0, doc.paras[0].len()));
+        doc.insert_text(Pos::new(1, 0), "Draft Copy", CharStyle::default());
+        let mut orig_bytes = Vec::new();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            orig_bytes = export(&ctx, &doc, &book);
+        });
+        out.textures_delta.clear();
+
+        // 2. Extract editable blocks and verify coordinates & text
+        let mut blocks = crate::pdf_import::extract_editable_blocks(&orig_bytes)
+            .expect("extract_editable_blocks succeeds");
+        assert!(blocks.len() >= 2, "expected at least 2 blocks, got {}", blocks.len());
+        assert!(blocks.iter().any(|b| b.text.contains("Quarterly")));
+        assert!(blocks.iter().any(|b| b.text.contains("Draft")));
+
+        // 3. Edit one block, delete another, and add a brand-new text box
+        if let Some(b) = blocks.iter_mut().find(|b| b.text.contains("Quarterly")) {
+            b.text = "Annual Executive Summary".into();
+            b.modified = true;
+        }
+        if let Some(b) = blocks.iter_mut().find(|b| b.text.contains("Draft")) {
+            b.deleted = true;
+            b.modified = true;
+        }
+        let next_id = blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
+        blocks.push(crate::pdf_import::PdfTextBlock {
+            id: next_id,
+            page: 0,
+            x_pt: 72.0,
+            y_pt: 200.0,
+            orig_x_pt: 72.0,
+            orig_y_pt: 200.0,
+            orig_w_pt: 180.0,
+            w_pt: 180.0,
+            h_pt: 18.0,
+            original_text: String::new(),
+            text: "Approved Final Version".into(),
+            font: crate::doc::DEFAULT_FONT,
+            size_pt: 12.0,
+            bold: true,
+            italic: false,
+            align: Align::Justify,
+            color: [24, 72, 168],
+            bg_color: [255, 255, 255],
+            deleted: false,
+            is_added: true,
+            modified: true,
+        });
+
+        // 4. Export edited PDF via krilla and verify with hayro + pdf_import
+        let arc_orig = Arc::new(orig_bytes);
+        let dims = hayro_pdf_info(arc_orig.clone()).expect("hayro dims");
+        let edited_bytes = export_edited_pdf(arc_orig, &dims, &blocks).expect("export_edited_pdf");
+        assert!(edited_bytes.starts_with(b"%PDF-1."));
+        let edited_dims = hayro_pdf_info(Arc::new(edited_bytes.clone())).expect("hayro reads edited PDF");
+        assert_eq!(edited_dims.len(), dims.len());
+        let reparsed = crate::pdf_import::read(&edited_bytes).expect("pdf_import reads edited PDF");
+        let plain = reparsed.plain_text();
+        let flat = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("Annual Executive Summary"), "edited text missing: {plain}");
+        assert!(flat.contains("Approved Final Version"), "added text box missing: {plain}");
     }
 
     #[test]

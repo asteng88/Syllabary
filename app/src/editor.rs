@@ -62,12 +62,133 @@ struct LayoutKey {
     fonts_rev: u64,
 }
 
-/// Pixel-accurate PDF page viewer backed by `hayro` (pure-Rust ISO 32000 renderer).
+/// Active viewing/editing mode for an opened PDF document.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PdfMode {
+    /// Clean, pixel-accurate `hayro` rendering (including any in-place edits, with no editing chrome).
+    #[default]
+    Read,
+    /// In-place text editing directly on top of the exact `hayro` PDF pages.
+    Edit,
+    /// Converted reflowable Syllabary word-processor document view.
+    Reflow,
+}
+
+/// Exclusive drag operation on a selected PDF text block (move position or resize width).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum PdfBlockDrag {
+    #[default]
+    None,
+    Move {
+        id: u64,
+        start_ptr: Pos2,
+        start_x_pt: f32,
+        start_y_pt: f32,
+    },
+    ResizeWidth {
+        id: u64,
+        start_ptr_x: f32,
+        start_w_pt: f32,
+    },
+}
+
+impl PdfBlockDrag {
+    fn is_active(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn block_id(self) -> Option<u64> {
+        match self {
+            Self::None => None,
+            Self::Move { id, .. } | Self::ResizeWidth { id, .. } => Some(id),
+        }
+    }
+}
+
+/// Pixel-accurate PDF page viewer & in-place text editor backed by `hayro` and `krilla`.
 pub struct PdfExactView {
     pub bytes: std::sync::Arc<Vec<u8>>,
     pub page_dims_pt: Vec<(f32, f32)>,
-    pub active: bool,
+    pub mode: PdfMode,
+    pub blocks: Vec<crate::pdf_import::PdfTextBlock>,
+    pub selected_block: Option<u64>,
+    pub adding_text_box: bool,
+    pub undo: Vec<Vec<crate::pdf_import::PdfTextBlock>>,
+    pub redo: Vec<Vec<crate::pdf_import::PdfTextBlock>>,
+    next_block_id: u64,
+    pub editing_checkpointed: Option<u64>,
+    drag: PdfBlockDrag,
     textures: std::collections::HashMap<(usize, u32), egui::TextureHandle>,
+}
+
+impl PdfExactView {
+    pub fn is_exact(&self) -> bool {
+        matches!(self.mode, PdfMode::Read | PdfMode::Edit)
+    }
+
+    pub fn has_edits(&self) -> bool {
+        self.blocks.iter().any(|b| b.modified || b.deleted || b.is_added)
+    }
+
+    pub fn checkpoint(&mut self) {
+        self.undo.push(self.blocks.clone());
+        if self.undo.len() > 64 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.blocks, prev));
+            self.editing_checkpointed = None;
+            if let Some(sel) = self.selected_block {
+                if !self.blocks.iter().any(|b| b.id == sel && !b.deleted) {
+                    self.selected_block = None;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.blocks, next));
+            self.editing_checkpointed = None;
+            if let Some(sel) = self.selected_block {
+                if !self.blocks.iter().any(|b| b.id == sel && !b.deleted) {
+                    self.selected_block = None;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Replaces the backing PDF bytes after saving an edited PDF so Read mode renders
+    /// the freshly baked PDF directly via `hayro`.
+    pub fn reload_saved(&mut self, bytes: Vec<u8>) {
+        let arc = std::sync::Arc::new(bytes);
+        if let Some(dims) = crate::pdf::hayro_pdf_info(arc.clone()) {
+            if !dims.is_empty() {
+                self.page_dims_pt = dims;
+            }
+        }
+        let fresh_blocks = crate::pdf_import::extract_editable_blocks(&arc).unwrap_or_default();
+        self.next_block_id = fresh_blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
+        self.bytes = arc;
+        self.blocks = fresh_blocks;
+        self.textures.clear();
+        self.selected_block = None;
+        self.adding_text_box = false;
+        self.editing_checkpointed = None;
+        self.drag = PdfBlockDrag::None;
+        self.undo.clear();
+        self.redo.clear();
+    }
 }
 
 pub struct Tab {
@@ -100,11 +221,66 @@ pub struct Tab {
     pub active_table_cell_rect: Option<(u32, u16, u16, Rect, Rect)>,
     pub selected_cells: Vec<(u32, u16, u16)>,
     image_textures: std::collections::HashMap<u64, (usize, egui::TextureHandle)>,
-    resizing_image: Option<(u64, u8, Pos2, f32, f32)>,
-    resizing_table_col: Option<(u32, usize, usize, f32, f32)>,
-    resizing_table_row: Option<(u32, usize, f32, f32)>,
-    drag_cell_anchor: Option<(u32, u16, u16)>,
+    pub drag: CanvasDrag,
     pub pdf_view: Option<PdfExactView>,
+}
+
+/// Exclusive pointer drag interaction active on the document canvas.
+/// Replaces four separate `Option<...>` fields so image resize, table column/row resize,
+/// and multi-cell selection can never overlap or leave stale partial state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CanvasDrag {
+    #[default]
+    Idle,
+    ResizingImage {
+        id: u64,
+        handle: u8,
+        start_pos: Pos2,
+        w0_in: f32,
+        h0_in: f32,
+    },
+    ResizingTableCol {
+        table_id: u32,
+        row: usize,
+        col: usize,
+        start_x: f32,
+        start_w_in: f32,
+    },
+    ResizingTableRow {
+        table_id: u32,
+        row: usize,
+        start_y: f32,
+        start_h_pt: f32,
+    },
+    SelectingCells {
+        table_id: u32,
+        anchor_row: u16,
+        anchor_col: u16,
+    },
+}
+
+impl CanvasDrag {
+    pub fn is_idle(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub fn is_resizing_image(self) -> bool {
+        matches!(self, Self::ResizingImage { .. })
+    }
+
+    pub fn resizing_image_id(self) -> Option<u64> {
+        match self {
+            Self::ResizingImage { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn resizing_image_handle(self) -> Option<(u64, u8)> {
+        match self {
+            Self::ResizingImage { id, handle, .. } => Some((id, handle)),
+            _ => None,
+        }
+    }
 }
 
 pub struct ViewOpts<'a> {
@@ -209,28 +385,73 @@ impl Tab {
             active_table_cell_rect: None,
             selected_cells: Vec::new(),
             image_textures: Default::default(),
-            resizing_image: None,
-            resizing_table_col: None,
-            resizing_table_row: None,
-            drag_cell_anchor: None,
+            drag: CanvasDrag::Idle,
             pdf_view: None,
         }
     }
 
-    /// Attaches raw PDF bytes for pixel-accurate `hayro` rendering, with one-click switching
-    /// between Exact PDF View and Editable Reflow Mode.
+    /// Attaches raw PDF bytes for pixel-accurate `hayro` rendering and extracts positioned
+    /// text blocks for in-place editing (`PdfMode::Read` ↔ `PdfMode::Edit`).
     pub fn attach_pdf_exact_view(&mut self, bytes: Vec<u8>) {
         let arc = std::sync::Arc::new(bytes);
         if let Some(dims) = crate::pdf::hayro_pdf_info(arc.clone()) {
             if !dims.is_empty() {
+                let blocks = crate::pdf_import::extract_editable_blocks(&arc).unwrap_or_default();
+                let next_block_id = blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
                 self.pdf_view = Some(PdfExactView {
                     bytes: arc,
                     page_dims_pt: dims,
-                    active: true,
+                    mode: PdfMode::Read,
+                    blocks,
+                    selected_block: None,
+                    adding_text_box: false,
+                    undo: Vec::new(),
+                    redo: Vec::new(),
+                    next_block_id,
+                    editing_checkpointed: None,
+                    drag: PdfBlockDrag::None,
                     textures: std::collections::HashMap::new(),
                 });
             }
         }
+    }
+
+    pub fn pdf_mode(&self) -> Option<PdfMode> {
+        self.pdf_view.as_ref().map(|pv| pv.mode)
+    }
+
+    pub fn set_pdf_mode(&mut self, mode: PdfMode) {
+        if let Some(pv) = self.pdf_view.as_mut() {
+            pv.mode = mode;
+            if mode != PdfMode::Edit {
+                pv.selected_block = None;
+                pv.adding_text_box = false;
+                pv.editing_checkpointed = None;
+                pv.drag = PdfBlockDrag::None;
+            }
+        }
+    }
+
+    pub fn pdf_undo(&mut self) -> bool {
+        if let Some(pv) = self.pdf_view.as_mut() {
+            if pv.mode == PdfMode::Edit && pv.undo() {
+                self.rev += 1;
+                self.dirty = pv.has_edits();
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn pdf_redo(&mut self) -> bool {
+        if let Some(pv) = self.pdf_view.as_mut() {
+            if pv.mode == PdfMode::Edit && pv.redo() {
+                self.rev += 1;
+                self.dirty = pv.has_edits();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn save_version(&mut self, name: impl Into<String>) {
@@ -539,7 +760,16 @@ impl Tab {
                 }
             } else {
                 let from = if word { self.doc.word_left(self.caret) } else { self.doc.prev(self.caret) };
-                self.caret = self.doc.delete_range(from, self.caret);
+                let cur_f = self.doc.paras[self.caret.p].fmt;
+                let prev_f = self.doc.paras[from.p].fmt;
+                let crosses_cell = from.p != self.caret.p
+                    && (cur_f.table_id > 0 || prev_f.table_id > 0)
+                    && (cur_f.table_id != prev_f.table_id
+                        || cur_f.table_row != prev_f.table_row
+                        || cur_f.table_col != prev_f.table_col);
+                if !crosses_cell {
+                    self.caret = self.doc.delete_range(from, self.caret);
+                }
             }
             self.anchor = self.caret;
         }
@@ -572,7 +802,16 @@ impl Tab {
                 self.selected_image = None;
             } else {
                 let to = if word { self.doc.word_right(self.caret) } else { self.doc.next(self.caret) };
-                self.caret = self.doc.delete_range(self.caret, to);
+                let cur_f = self.doc.paras[self.caret.p].fmt;
+                let next_f = self.doc.paras[to.p].fmt;
+                let crosses_cell = to.p != self.caret.p
+                    && (cur_f.table_id > 0 || next_f.table_id > 0)
+                    && (cur_f.table_id != next_f.table_id
+                        || cur_f.table_row != next_f.table_row
+                        || cur_f.table_col != next_f.table_col);
+                if !crosses_cell {
+                    self.caret = self.doc.delete_range(self.caret, to);
+                }
                 self.anchor = self.caret;
             }
         }
@@ -1073,6 +1312,73 @@ impl Tab {
     fn move_vert(&mut self, lay: &PageLayout, lines: isize, extend: bool) {
         let li = lay.line_of(self.caret.p, self.caret.c);
         let x = self.desired_x.unwrap_or_else(|| lay.x_in_line(li, self.caret.c));
+        let cur_fmt = self.doc.paras[self.caret.p].fmt;
+
+        // Inside a table cell, Up/Down must move vertically within the cell and then to the
+        // same column in the row above/below — NEVER sideways to an adjacent column!
+        if cur_fmt.table_id > 0 && lines.abs() == 1 {
+            let tid = cur_fmt.table_id;
+            let r = cur_fmt.table_row as usize;
+            let c = cur_fmt.table_col as usize;
+            let cell_lines: Vec<usize> = lay
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| {
+                    let f = self.doc.paras[l.para].fmt;
+                    f.table_id == tid && f.table_row as usize == r && f.table_col as usize == c
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if let Some(pos_in_cell) = cell_lines.iter().position(|&idx| idx == li) {
+                let next_in_cell = pos_in_cell as isize + lines;
+                if next_in_cell >= 0 && (next_in_cell as usize) < cell_lines.len() {
+                    let tli = cell_lines[next_in_cell as usize];
+                    let pos = Pos::new(lay.lines[tli].para, lay.char_at_x(tli, x));
+                    self.set_caret(pos, extend);
+                    self.desired_x = Some(x);
+                    return;
+                }
+            }
+            if let Some(tbl) = self.doc.table(tid) {
+                let target_row = r as isize + lines;
+                if target_row >= 0 && (target_row as usize) < tbl.rows.len() {
+                    let tr = target_row as usize;
+                    let max_col = tbl.rows[tr].cells.len().saturating_sub(1);
+                    let tc = c.min(max_col);
+                    if let Some(tp) = self.doc.table_cell_para(tid, tr, tc) {
+                        let tli = lay.line_of(tp, 0);
+                        let pos = Pos::new(lay.lines[tli].para, lay.char_at_x(tli, x));
+                        self.set_caret(pos, extend);
+                        self.desired_x = Some(x);
+                        return;
+                    }
+                } else if target_row < 0 {
+                    // Move to paragraph immediately before the table
+                    let first_tbl_p = self.doc.paras.iter().position(|p| p.fmt.table_id == tid).unwrap_or(0);
+                    if first_tbl_p > 0 {
+                        let prev_p = first_tbl_p - 1;
+                        let tli = lay.line_of(prev_p, self.doc.paras[prev_p].len());
+                        let pos = Pos::new(lay.lines[tli].para, lay.char_at_x(tli, x));
+                        self.set_caret(pos, extend);
+                        self.desired_x = Some(x);
+                        return;
+                    }
+                } else {
+                    // Move to paragraph immediately after the table
+                    let last_tbl_p = self.doc.paras.iter().rposition(|p| p.fmt.table_id == tid).unwrap_or(self.caret.p);
+                    if last_tbl_p + 1 < self.doc.paras.len() {
+                        let next_p = last_tbl_p + 1;
+                        let tli = lay.line_of(next_p, 0);
+                        let pos = Pos::new(lay.lines[tli].para, lay.char_at_x(tli, x));
+                        self.set_caret(pos, extend);
+                        self.desired_x = Some(x);
+                        return;
+                    }
+                }
+            }
+        }
+
         let target = (li as isize + lines).clamp(0, lay.lines.len() as isize - 1) as usize;
         let pos = if target == li && lines < 0 {
             Pos::new(self.caret.p, 0)
@@ -1083,6 +1389,69 @@ impl Tab {
         };
         self.set_caret(pos, extend);
         self.desired_x = Some(x);
+    }
+
+    /// Moves cell-to-cell in a table on `Tab` / `Shift+Tab` using exact `(row, col)` grid coordinates.
+    /// Pressing `Tab` in the very last cell automatically appends a new row and moves into its first cell.
+    pub fn tab_in_table(&mut self, shift: bool, now: f64) -> bool {
+        let pfmt = self.doc.paras[self.caret.p].fmt;
+        if pfmt.table_id == 0 {
+            return false;
+        }
+        let tid = pfmt.table_id;
+        let r = pfmt.table_row as usize;
+        let c = pfmt.table_col as usize;
+        self.doc.evaluate_table_formulas(tid);
+        self.selected_cells.clear();
+
+        let Some(tbl) = self.doc.table(tid) else {
+            return true;
+        };
+        let nrows = tbl.rows.len();
+        if nrows == 0 {
+            return true;
+        }
+        let cur_cols = tbl.rows.get(r).map_or(1, |row| row.cells.len()).max(1);
+
+        if !shift {
+            let target = if c + 1 < cur_cols {
+                Some((r, c + 1))
+            } else if r + 1 < nrows {
+                Some((r + 1, 0))
+            } else {
+                None
+            };
+            if let Some((tr, tc)) = target {
+                if let Some(tp) = self.doc.table_cell_para(tid, tr, tc) {
+                    let end_c = self.doc.paras[tp].len();
+                    self.set_caret(Pos::new(tp, end_c), false);
+                }
+            } else {
+                // At the very last cell of the table: append a new row and jump into its first cell!
+                self.checkpoint(EditKind::Other, now);
+                if let Some(new_pos) = self.doc.table_insert_row(tid, r, false) {
+                    self.set_caret(new_pos, false);
+                    self.changed();
+                }
+            }
+        } else {
+            let target = if c > 0 {
+                Some((r, c - 1))
+            } else if r > 0 {
+                let prev_cols = tbl.rows[r - 1].cells.len().max(1);
+                Some((r - 1, prev_cols - 1))
+            } else {
+                None
+            };
+            if let Some((tr, tc)) = target {
+                if let Some(tp) = self.doc.table_cell_para(tid, tr, tc) {
+                    let end_c = self.doc.paras[tp].len();
+                    self.set_caret(Pos::new(tp, end_c), false);
+                }
+            }
+        }
+        self.rev += 1;
+        true
     }
 
     // ── keyboard ────────────────────────────────────────────
@@ -1277,30 +1646,7 @@ impl Tab {
             Key::Tab if !ro => {
                 let pfmt = self.doc.paras[self.caret.p].fmt;
                 if pfmt.table_id > 0 {
-                    let tid = pfmt.table_id;
-                    let r = pfmt.table_row;
-                    let c = pfmt.table_col;
-                    self.doc.evaluate_table_formulas(tid);
-                    self.rev += 1;
-                    if !shift {
-                        if let Some(next_p) = ((self.caret.p + 1)..self.doc.paras.len())
-                            .find(|&pi| self.doc.paras[pi].fmt.table_id == tid && (self.doc.paras[pi].fmt.table_row != r || self.doc.paras[pi].fmt.table_col != c))
-                        {
-                            self.set_caret(Pos::new(next_p, 0), false);
-                        }
-                    } else if let Some(prev_p) = (0..self.caret.p)
-                        .rev()
-                        .find(|&pi| self.doc.paras[pi].fmt.table_id == tid && (self.doc.paras[pi].fmt.table_row != r || self.doc.paras[pi].fmt.table_col != c))
-                    {
-                        let pr = self.doc.paras[prev_p].fmt.table_row;
-                        let pc = self.doc.paras[prev_p].fmt.table_col;
-                        let first_in_cell = (0..=prev_p)
-                            .rev()
-                            .take_while(|&pi| self.doc.paras[pi].fmt.table_id == tid && self.doc.paras[pi].fmt.table_row == pr && self.doc.paras[pi].fmt.table_col == pc)
-                            .last()
-                            .unwrap_or(prev_p);
-                        self.set_caret(Pos::new(first_in_cell, 0), false);
-                    }
+                    self.tab_in_table(shift, now);
                 } else if pfmt.list != ListKind::None || (self.has_selection() && self.anchor.p != self.caret.p) {
                     self.apply_para(now, &move |f| {
                         if shift {
@@ -1446,23 +1792,23 @@ impl Tab {
 
     // ── drawing ─────────────────────────────────────────────
     /// Renders an opened PDF pixel-accurately via `hayro` (on-demand per visible page),
-    /// with a one-click switch to Editable Reflow Mode.
+    /// supporting explicit `Read` (clean final view) and `Edit` (in-place text editing) modes.
+    /// Editing controls live cleanly in the right-hand PDF Editor side panel.
     fn show_pdf_exact(&mut self, ui: &mut egui::Ui, opts: &ViewOpts) -> (egui::Response, Option<Rect>) {
-        let mut switch_to_edit = false;
-        let page_count = self.pdf_view.as_ref().map_or(0, |pv| pv.page_dims_pt.len());
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            ui.label(egui::RichText::new(format!("Exact PDF View ({page_count} page{})", if page_count == 1 { "" } else { "s" })).strong().small());
-            if ui.small_button("Switch to Editable Document").clicked() {
-                switch_to_edit = true;
-            }
-        });
-        if switch_to_edit {
+        let th = opts.theme;
+        let is_edit = self.pdf_view.as_ref().is_some_and(|pv| pv.mode == PdfMode::Edit);
+
+        // Escape cancels add-text-box or deselects active block
+        if is_edit && ui.input(|i| i.key_pressed(Key::Escape)) {
             if let Some(pv) = self.pdf_view.as_mut() {
-                pv.active = false;
+                pv.adding_text_box = false;
+                pv.selected_block = None;
+                pv.editing_checkpointed = None;
+                pv.drag = PdfBlockDrag::None;
             }
         }
 
+        let adding_box = self.pdf_view.as_ref().is_some_and(|pv| pv.adding_text_box);
         let avail_w = ui.available_width();
         let px_per_pt = (layout::BASE_PPI / 72.0) * opts.zoom;
         let ppp = ui.ctx().pixels_per_point();
@@ -1482,17 +1828,25 @@ impl Tab {
         }
 
         let (canvas, resp) = ui.allocate_exact_size(vec2(max_w, total_h.max(200.0)), Sense::click());
+        let resp = if adding_box {
+            resp.on_hover_cursor(egui::CursorIcon::Crosshair)
+        } else {
+            resp
+        };
         self.canvas_x0 = canvas.min.x;
         self.canvas_w = canvas.width();
         let clip = ui.clip_rect();
         let painter = ui.painter();
+        let hover_pos = ui.input(|i| i.pointer.hover_pos());
 
+        let mut page_screen_rects: Vec<(usize, Rect)> = Vec::with_capacity(page_rects.len());
         if let Some(pv) = self.pdf_view.as_mut() {
             // Evict textures from previous zoom levels to keep GPU memory bounded
             pv.textures.retain(|&(_, sk), _| sk == scale_key);
             for (idx, sz, top_y) in page_rects {
                 let x = canvas.min.x + ((canvas.width() - sz.x) * 0.5).max(PAGE_GAP);
                 let rect = Rect::from_min_size(pos2(x, canvas.min.y + top_y), sz);
+                page_screen_rects.push((idx, rect));
                 if !rect.intersects(clip.expand(sz.y * 0.5)) {
                     continue;
                 }
@@ -1519,21 +1873,466 @@ impl Tab {
                 painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_gray(205)), StrokeKind::Outside);
             }
         }
+
+        // Composite background patches + wrapped/aligned/justified edited text on top of the exact PDF pages
+        let mut clicked_block: Option<u64> = None;
+        let mut active_edit_rect: Option<(u64, Rect)> = None;
+        if let Some(pv) = self.pdf_view.as_ref() {
+            let sel = pv.selected_block;
+            for &(page_idx, page_rect) in &page_screen_rects {
+                if !page_rect.intersects(clip.expand(40.0)) {
+                    continue;
+                }
+                for b in pv.blocks.iter().filter(|b| b.page == page_idx) {
+                    let bx = page_rect.min.x + b.x_pt * px_per_pt;
+                    let by = page_rect.min.y + b.y_pt * px_per_pt;
+                    let bw = (b.w_pt * px_per_pt).max(32.0);
+                    let bh = (b.h_pt * px_per_pt).max(14.0);
+                    let brect = Rect::from_min_size(pos2(bx, by), vec2(bw, bh));
+
+                    // Paint background patch over modified or deleted original PDF text at its original location & width
+                    if !b.is_added && (b.modified || b.deleted) {
+                        let ox = page_rect.min.x + b.orig_x_pt * px_per_pt;
+                        let oy = page_rect.min.y + b.orig_y_pt * px_per_pt;
+                        let ow = (b.orig_w_pt * px_per_pt).max(16.0);
+                        let orig_rect = Rect::from_min_size(pos2(ox, oy), vec2(ow, bh));
+                        let pad_x = 1.5 * px_per_pt;
+                        let pad_y = 1.0 * px_per_pt;
+                        let patch = Rect::from_min_max(
+                            pos2((orig_rect.min.x - pad_x).max(page_rect.min.x), (orig_rect.min.y - pad_y).max(page_rect.min.y)),
+                            pos2((orig_rect.max.x + pad_x).min(page_rect.max.x), (orig_rect.max.y + pad_y).min(page_rect.max.y)),
+                        );
+                        painter.rect_filled(patch, 0.0, Color32::from_rgb(b.bg_color[0], b.bg_color[1], b.bg_color[2]));
+                    }
+
+                    if b.deleted {
+                        continue;
+                    }
+
+                    let (fam, _) = opts.book.family(b.font, b.bold, b.italic);
+                    let fid = egui::FontId::new((b.size_pt * px_per_pt).max(6.0), fam);
+                    let col = Color32::from_rgb(b.color[0], b.color[1], b.color[2]);
+
+                    // Measure wrapped height so multi-line & justified text boxes expand vertically
+                    let line_h_px = (b.size_pt * 1.28 * px_per_pt).max(10.0);
+                    let wrapped_paras: Vec<Vec<Vec<String>>> = if b.modified || b.is_added || (is_edit && sel == Some(b.id)) {
+                        ui.fonts_mut(|fonts| {
+                            let space_w = fonts
+                                .layout_no_wrap(" ".to_string(), fid.clone(), col)
+                                .rect
+                                .width()
+                                .max(fid.size * 0.25);
+                            b.text
+                                .split('\n')
+                                .map(|para| {
+                                    let words: Vec<&str> = para.split_whitespace().collect();
+                                    if words.is_empty() {
+                                        return vec![Vec::new()];
+                                    }
+                                    let mut lines: Vec<Vec<String>> = Vec::new();
+                                    let mut cur: Vec<String> = Vec::new();
+                                    let mut cur_w = 0.0f32;
+                                    for w in words {
+                                        let ww = fonts
+                                            .layout_no_wrap(w.to_string(), fid.clone(), col)
+                                            .rect
+                                            .width();
+                                        let add = if cur.is_empty() { ww } else { space_w + ww };
+                                        if !cur.is_empty() && cur_w + add > bw {
+                                            lines.push(std::mem::take(&mut cur));
+                                            cur_w = ww;
+                                            cur.push(w.to_string());
+                                        } else {
+                                            cur_w += add;
+                                            cur.push(w.to_string());
+                                        }
+                                    }
+                                    if !cur.is_empty() {
+                                        lines.push(cur);
+                                    }
+                                    lines
+                                })
+                                .collect()
+                        })
+                    } else {
+                        Vec::new()
+                    };
+                    let total_lines = wrapped_paras.iter().map(|p| p.len()).sum::<usize>().max(1);
+                    let rendered_h = (total_lines as f32 * line_h_px).max(bh);
+                    let hit_rect = Rect::from_min_size(brect.min, vec2(bw, rendered_h));
+
+                    let is_sel = is_edit && sel == Some(b.id);
+                    if is_sel {
+                        let edit_w = bw.clamp(40.0 * px_per_pt, (page_rect.max.x - brect.min.x).max(40.0 * px_per_pt));
+                        let edit_h = (rendered_h + 6.0).max(bh + 4.0);
+                        active_edit_rect = Some((b.id, Rect::from_min_size(brect.min, vec2(edit_w, edit_h))));
+                    } else if b.modified || b.is_added {
+                        // Layout galleys inside `ui.fonts_mut` first, then paint outside the lock
+                        // (calling `painter.text` inside `ui.fonts_mut` re-entrantly locks Fonts and panics).
+                        let mut line_y = brect.min.y;
+                        let mut paint_galleys: Vec<(Pos2, std::sync::Arc<egui::Galley>)> = Vec::new();
+                        ui.fonts_mut(|fonts| {
+                            let space_w = fonts
+                                .layout_no_wrap(" ".to_string(), fid.clone(), col)
+                                .rect
+                                .width()
+                                .max(fid.size * 0.25);
+                            for para_lines in &wrapped_paras {
+                                let last_idx = para_lines.len().saturating_sub(1);
+                                for (li, words) in para_lines.iter().enumerate() {
+                                    if !words.is_empty() {
+                                        let is_last = li == last_idx;
+                                        if b.align == Align::Justify && !is_last && words.len() >= 2 {
+                                            let word_galleys: Vec<std::sync::Arc<egui::Galley>> = words
+                                                .iter()
+                                                .map(|w| fonts.layout_no_wrap(w.clone(), fid.clone(), col))
+                                                .collect();
+                                            let total_ww: f32 =
+                                                word_galleys.iter().map(|g| g.rect.width()).sum();
+                                            let gap = ((bw - total_ww) / (words.len() - 1) as f32)
+                                                .max(space_w * 0.5);
+                                            let mut cx = brect.min.x;
+                                            for g in word_galleys {
+                                                let ww = g.rect.width();
+                                                paint_galleys.push((pos2(cx, line_y), g));
+                                                cx += ww + gap;
+                                            }
+                                        } else {
+                                            let line_str = words.join(" ");
+                                            let g = fonts.layout_no_wrap(line_str, fid.clone(), col);
+                                            let lw = g.rect.width();
+                                            let lx = match b.align {
+                                                Align::Left | Align::Justify => brect.min.x,
+                                                Align::Center => brect.min.x + ((bw - lw) * 0.5).max(0.0),
+                                                Align::Right => brect.min.x + (bw - lw).max(0.0),
+                                            };
+                                            paint_galleys.push((pos2(lx, line_y), g));
+                                        }
+                                    }
+                                    line_y += line_h_px;
+                                }
+                            }
+                        });
+                        for (gpos, galley) in paint_galleys {
+                            painter.galley(gpos, galley, col);
+                        }
+                    }
+
+                    if is_edit && !is_sel {
+                        let hov = hover_pos.is_some_and(|hp| hit_rect.expand(2.0).contains(hp));
+                        if hov {
+                            painter.rect_filled(hit_rect.expand(1.5), 2.0, th.accent.gamma_multiply(0.10));
+                            painter.rect_stroke(
+                                hit_rect.expand(1.5),
+                                2.0,
+                                Stroke::new(1.2, th.accent),
+                                StrokeKind::Outside,
+                            );
+                        } else if b.modified || b.is_added {
+                            painter.rect_stroke(
+                                hit_rect.expand(1.0),
+                                2.0,
+                                Stroke::new(0.8, th.accent.gamma_multiply(0.35)),
+                                StrokeKind::Outside,
+                            );
+                        }
+                        if resp.clicked() && !adding_box {
+                            if let Some(pp) = resp.interact_pointer_pos() {
+                                if hit_rect.expand(2.5).contains(pp) {
+                                    clicked_block = Some(b.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle clicks on the PDF page in Edit mode (select block, add text box, or deselect)
+        let mut just_added_block: Option<u64> = None;
+        let is_dragging_block = self.pdf_view.as_ref().is_some_and(|pv| pv.drag.is_active());
+        if is_edit && resp.clicked() && !is_dragging_block {
+            if let Some(id) = clicked_block {
+                if let Some(pv) = self.pdf_view.as_mut() {
+                    pv.selected_block = Some(id);
+                    pv.editing_checkpointed = None;
+                }
+            } else if let Some(pp) = resp.interact_pointer_pos() {
+                if adding_box {
+                    if let Some(&(page_idx, page_rect)) = page_screen_rects.iter().find(|(_, r)| r.contains(pp)) {
+                        let x_pt = ((pp.x - page_rect.min.x) / px_per_pt).max(0.0);
+                        let y_pt = ((pp.y - page_rect.min.y) / px_per_pt).max(0.0);
+                        if let Some(pv) = self.pdf_view.as_mut() {
+                            pv.checkpoint();
+                            let id = pv.next_block_id;
+                            pv.next_block_id += 1;
+                            pv.blocks.push(crate::pdf_import::PdfTextBlock {
+                                id,
+                                page: page_idx,
+                                x_pt,
+                                y_pt,
+                                orig_x_pt: x_pt,
+                                orig_y_pt: y_pt,
+                                orig_w_pt: 200.0,
+                                w_pt: 200.0,
+                                h_pt: 16.0,
+                                original_text: String::new(),
+                                text: String::new(),
+                                font: crate::doc::DEFAULT_FONT,
+                                size_pt: 12.0,
+                                bold: false,
+                                italic: false,
+                                align: Align::Left,
+                                color: [0, 0, 0],
+                                bg_color: [255, 255, 255],
+                                deleted: false,
+                                is_added: true,
+                                modified: true,
+                            });
+                            pv.selected_block = Some(id);
+                            pv.adding_text_box = false;
+                            pv.editing_checkpointed = Some(id);
+                            just_added_block = Some(id);
+                            self.rev += 1;
+                            self.dirty = true;
+                        }
+                    }
+                } else if let Some(pv) = self.pdf_view.as_mut() {
+                    pv.selected_block = None;
+                    pv.editing_checkpointed = None;
+                }
+            }
+        }
+
+        // Render live inline TextEdit + floating Move handle + right-edge Width resize handle
+        if is_edit && self.pdf_view.as_ref().is_some_and(|pv| pv.selected_block.is_some()) {
+            if let Some((sel_id, edit_rect)) = active_edit_rect {
+                let mut text_changed = false;
+                let mut geom_changed = false;
+                if let Some(pv) = self.pdf_view.as_mut() {
+                    if let Some(idx) = pv.blocks.iter().position(|b| b.id == sel_id) {
+                        let (page_idx, font_idx, size_pt, bold, italic, align, color, bg_color, cur_x_pt, cur_y_pt, cur_w_pt) = {
+                            let b = &pv.blocks[idx];
+                            (b.page, b.font, b.size_pt, b.bold, b.italic, b.align, b.color, b.bg_color, b.x_pt, b.y_pt, b.w_pt)
+                        };
+                        let (pw_pt, ph_pt) = pv.page_dims_pt.get(page_idx).copied().unwrap_or((612.0, 792.0));
+                        let (fam, _) = opts.book.family(font_idx, bold, italic);
+                        let fid = egui::FontId::new((size_pt * px_per_pt).max(8.0), fam);
+                        let bg_c = Color32::from_rgb(bg_color[0], bg_color[1], bg_color[2]);
+                        let fg_c = Color32::from_rgb(color[0], color[1], color[2]);
+
+                        // 1. Floating "⋮⋮ Move" handle directly above the text box
+                        let handle_h = 18.0;
+                        let handle_w = 64.0;
+                        let handle_y = (edit_rect.min.y - handle_h - 3.0).max(clip.min.y + 2.0);
+                        let handle_rect = Rect::from_min_size(pos2(edit_rect.min.x - 1.5, handle_y), vec2(handle_w, handle_h));
+                        let handle_id = egui::Id::unique(("pdf_block_move", self.id, sel_id));
+                        let handle_resp = ui
+                            .interact(handle_rect, handle_id, Sense::click_and_drag())
+                            .on_hover_text("Drag to move this text box anywhere on the page")
+                            .on_hover_cursor(if matches!(pv.drag, PdfBlockDrag::Move { .. }) {
+                                egui::CursorIcon::Grabbing
+                            } else {
+                                egui::CursorIcon::Grab
+                            });
+
+                        // 2. Right-edge Width resize handle
+                        let resize_h = edit_rect.height().clamp(18.0, 34.0);
+                        let resize_rect = Rect::from_center_size(
+                            pos2(edit_rect.max.x + 3.0, edit_rect.center().y),
+                            vec2(8.0, resize_h),
+                        );
+                        let resize_id = egui::Id::unique(("pdf_block_resize_w", self.id, sel_id));
+                        let resize_resp = ui
+                            .interact(resize_rect, resize_id, Sense::click_and_drag())
+                            .on_hover_text("Drag left or right to resize text box width")
+                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+                        if handle_resp.drag_started() {
+                            if let Some(ptr) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                                pv.checkpoint();
+                                pv.drag = PdfBlockDrag::Move {
+                                    id: sel_id,
+                                    start_ptr: ptr,
+                                    start_x_pt: cur_x_pt,
+                                    start_y_pt: cur_y_pt,
+                                };
+                            }
+                        } else if resize_resp.drag_started() {
+                            if let Some(ptr) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                                pv.checkpoint();
+                                pv.drag = PdfBlockDrag::ResizeWidth {
+                                    id: sel_id,
+                                    start_ptr_x: ptr.x,
+                                    start_w_pt: cur_w_pt,
+                                };
+                            }
+                        }
+
+                        match pv.drag {
+                            PdfBlockDrag::Move {
+                                id,
+                                start_ptr,
+                                start_x_pt,
+                                start_y_pt,
+                            } if id == sel_id => {
+                                if ui.input(|i| i.pointer.primary_down()) {
+                                    if let Some(cur_ptr) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                                        let dx_pt = (cur_ptr.x - start_ptr.x) / px_per_pt.max(0.1);
+                                        let dy_pt = (cur_ptr.y - start_ptr.y) / px_per_pt.max(0.1);
+                                        let nx = (start_x_pt + dx_pt).clamp(0.0, (pw_pt - 20.0).max(0.0));
+                                        let ny = (start_y_pt + dy_pt).clamp(0.0, (ph_pt - 14.0).max(0.0));
+                                        let b = &mut pv.blocks[idx];
+                                        if (b.x_pt - nx).abs() > 0.05 || (b.y_pt - ny).abs() > 0.05 {
+                                            b.x_pt = nx;
+                                            b.y_pt = ny;
+                                            b.modified = true;
+                                            geom_changed = true;
+                                        }
+                                    }
+                                } else {
+                                    pv.drag = PdfBlockDrag::None;
+                                }
+                            }
+                            PdfBlockDrag::ResizeWidth {
+                                id,
+                                start_ptr_x,
+                                start_w_pt,
+                            } if id == sel_id => {
+                                if ui.input(|i| i.pointer.primary_down()) {
+                                    if let Some(cur_ptr) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                                        let dx_pt = (cur_ptr.x - start_ptr_x) / px_per_pt.max(0.1);
+                                        let max_w = (pw_pt - cur_x_pt).max(40.0);
+                                        let nw = (start_w_pt + dx_pt).clamp(40.0, max_w);
+                                        let b = &mut pv.blocks[idx];
+                                        if (b.w_pt - nw).abs() > 0.05 {
+                                            b.w_pt = nw;
+                                            b.modified = true;
+                                            geom_changed = true;
+                                        }
+                                    }
+                                } else {
+                                    pv.drag = PdfBlockDrag::None;
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        ui.painter().rect_filled(edit_rect.expand(1.5), 2.0, bg_c);
+                        ui.painter().rect_stroke(
+                            edit_rect.expand(1.5),
+                            2.0,
+                            Stroke::new(1.5, th.accent),
+                            StrokeKind::Outside,
+                        );
+                        // Paint Move pill
+                        let handle_bg = if handle_resp.hovered() || matches!(pv.drag, PdfBlockDrag::Move { .. }) {
+                            th.accent
+                        } else {
+                            th.accent.gamma_multiply(0.88)
+                        };
+                        ui.painter().rect_filled(handle_rect, 4.0, handle_bg);
+                        ui.painter().text(
+                            handle_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "⋮⋮ Move",
+                            egui::FontId::proportional(10.5),
+                            Color32::WHITE,
+                        );
+                        // Paint Right-Edge Width resize handle
+                        let r_bg = if resize_resp.hovered() || matches!(pv.drag, PdfBlockDrag::ResizeWidth { .. }) {
+                            th.accent
+                        } else {
+                            Color32::WHITE
+                        };
+                        ui.painter().rect_filled(resize_rect, 3.0, r_bg);
+                        ui.painter().rect_stroke(resize_rect, 3.0, Stroke::new(1.5, th.accent), StrokeKind::Inside);
+
+                        // Live geometry badge while moving or resizing
+                        if pv.drag.block_id() == Some(sel_id) {
+                            let b = &pv.blocks[idx];
+                            let badge_txt = match pv.drag {
+                                PdfBlockDrag::Move { .. } => format!("X:{:.0}  Y:{:.0} pt", b.x_pt, b.y_pt),
+                                PdfBlockDrag::ResizeWidth { .. } => format!("W:{:.0} pt", b.w_pt),
+                                PdfBlockDrag::None => String::new(),
+                            };
+                            let coord_rect = Rect::from_min_size(
+                                pos2(handle_rect.max.x + 6.0, handle_rect.min.y),
+                                vec2(96.0, handle_h),
+                            );
+                            ui.painter().rect_filled(coord_rect, 4.0, Color32::from_black_alpha(185));
+                            ui.painter().text(
+                                coord_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                badge_txt,
+                                egui::FontId::monospace(10.0),
+                                Color32::WHITE,
+                            );
+                        }
+
+                        let h_align = match align {
+                            Align::Center => egui::Align::Center,
+                            Align::Right => egui::Align::Max,
+                            Align::Left | Align::Justify => egui::Align::Min,
+                        };
+                        let prev_text = pv.blocks[idx].text.clone();
+                        let te_id = egui::Id::unique(("pdf_inline_edit", self.id, sel_id));
+                        let te_resp = ui.put(
+                            edit_rect,
+                            egui::TextEdit::multiline(&mut pv.blocks[idx].text)
+                                .id(te_id)
+                                .font(fid)
+                                .text_color(fg_c)
+                                .background_color(bg_c)
+                                .align(egui::Align2::new(h_align, egui::Align::TOP))
+                                .frame(egui::Frame::NONE)
+                                .desired_rows(1),
+                        );
+                        if !te_resp.has_focus() && (clicked_block == Some(sel_id) || just_added_block == Some(sel_id)) {
+                            te_resp.request_focus();
+                        }
+                        if te_resp.changed() {
+                            if pv.editing_checkpointed != Some(sel_id) {
+                                let mut snap = pv.blocks.clone();
+                                snap[idx].text = prev_text;
+                                pv.undo.push(snap);
+                                if pv.undo.len() > 64 {
+                                    pv.undo.remove(0);
+                                }
+                                pv.redo.clear();
+                                pv.editing_checkpointed = Some(sel_id);
+                            }
+                            let b = &mut pv.blocks[idx];
+                            b.modified = b.is_added || b.text != b.original_text;
+                            text_changed = true;
+                        }
+                    }
+                }
+                if text_changed || geom_changed {
+                    self.rev += 1;
+                    self.dirty = true;
+                }
+            }
+        }
+
         (resp, None)
     }
 
     /// Draws the pages and handles mouse input. Returns the caret's screen rect.
     pub fn show(&mut self, ui: &mut egui::Ui, opts: &ViewOpts, focus_id: egui::Id, cmds: &mut Vec<Cmd>) -> (egui::Response, Option<Rect>) {
-        if self.pdf_view.as_ref().is_some_and(|pv| pv.active) {
+        if self.pdf_view.as_ref().is_some_and(|pv| pv.is_exact()) {
             return self.show_pdf_exact(ui, opts);
         }
         if let Some(pv) = self.pdf_view.as_mut() {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                if ui.small_button("View Exact PDF").clicked() {
-                    pv.active = true;
+                if ui.small_button("Back to Exact PDF (Read)").clicked() {
+                    pv.mode = PdfMode::Read;
                 }
-                ui.label(egui::RichText::new("Editing reconstructed document").weak().small());
+                if ui.small_button("Edit on Exact PDF").clicked() {
+                    pv.mode = PdfMode::Edit;
+                }
+                ui.label(egui::RichText::new("Reflowable document mode").weak().small());
             });
         }
         let lay = self.layout(ui.ctx(), opts);
@@ -1673,7 +2472,7 @@ impl Tab {
         let mut hover_row_edge: Option<(u32, usize, f32, f32, f32)> = None; // (tid, row, y_screen, x0, x1)
         let mut hover_col_hdr: Option<(u32, usize)> = None;
         let mut hover_row_hdr: Option<(u32, usize)> = None;
-        if opts.mode != DocMode::Viewing && hover_handle.is_none() && self.resizing_image.is_none() {
+        if opts.mode != DocMode::Viewing && hover_handle.is_none() && !self.drag.is_resizing_image() {
             if let Some(hp) = hover_pos {
                 for &(t, c, hr, _) in &col_header_rects {
                     if hr.expand(1.5).contains(hp) {
@@ -1690,7 +2489,7 @@ impl Tab {
                     }
                 }
                 if hover_col_hdr.is_none() && hover_row_hdr.is_none() {
-                    let tol = 5.0_f32;
+                    let tol = 3.5_f32;
                     for &(t, r, c, cr) in &cell_screen_rects {
                         if hp.y >= cr.min.y - 2.0 && hp.y <= cr.max.y + 2.0 && (hp.x - cr.max.x).abs() <= tol {
                             let mut y0 = cr.min.y;
@@ -1729,7 +2528,7 @@ impl Tab {
                 if let Some(auto_w) = layout::measure_column_autofit_width_in(ui.ctx(), &self.doc, opts.book, tid, r_idx, c_idx) {
                     self.checkpoint(EditKind::Other, now);
                     self.doc.table_resize_col(tid, r_idx, c_idx, auto_w);
-                    self.resizing_table_col = None;
+                    self.drag = CanvasDrag::Idle;
                     self.changed();
                     self.scroll_to_caret = false;
                     handled_table_edge = true;
@@ -1738,7 +2537,7 @@ impl Tab {
                 if let Some(auto_h_pt) = layout::measure_row_autofit_height_pt(ui.ctx(), &self.doc, opts.book, tid, r_idx) {
                     self.checkpoint(EditKind::Other, now);
                     self.doc.table_resize_row(tid, r_idx, auto_h_pt);
-                    self.resizing_table_row = None;
+                    self.drag = CanvasDrag::Idle;
                     self.changed();
                     self.scroll_to_caret = false;
                     handled_table_edge = true;
@@ -1748,9 +2547,7 @@ impl Tab {
 
         // Start or continue dragging a table column border or row border
         if !handled_table_edge
-            && self.resizing_image.is_none()
-            && self.resizing_table_col.is_none()
-            && self.resizing_table_row.is_none()
+            && self.drag.is_idle()
             && opts.mode != DocMode::Viewing
             && (ui.input(|i| i.pointer.primary_pressed()) || resp.drag_started())
         {
@@ -1763,7 +2560,13 @@ impl Tab {
                         .and_then(|r| r.cells.get(c_idx))
                         .map_or(1.5, |c| c.width_in);
                     self.checkpoint(EditKind::Other, now);
-                    self.resizing_table_col = Some((tid, r_idx, c_idx, hp.x, start_w));
+                    self.drag = CanvasDrag::ResizingTableCol {
+                        table_id: tid,
+                        row: r_idx,
+                        col: c_idx,
+                        start_x: hp.x,
+                        start_w_in: start_w,
+                    };
                     handled_table_edge = true;
                 } else if let Some((tid, r_idx, ..)) = hover_row_edge {
                     let pt = lay.ppi / 72.0;
@@ -1772,45 +2575,64 @@ impl Tab {
                         .find(|(t, r, _, _)| *t == tid && *r as usize == r_idx)
                         .map_or(24.0, |(_, _, _, cr)| cr.height() / pt.max(0.1));
                     self.checkpoint(EditKind::Other, now);
-                    self.resizing_table_row = Some((tid, r_idx, hp.y, start_h_pt));
+                    self.drag = CanvasDrag::ResizingTableRow {
+                        table_id: tid,
+                        row: r_idx,
+                        start_y: hp.y,
+                        start_h_pt,
+                    };
                     handled_table_edge = true;
                 }
             }
         }
-        if let Some((tid, r_idx, c_idx, start_x, start_w)) = self.resizing_table_col {
-            if ui.input(|i| i.pointer.primary_down()) {
-                if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
-                    let dx_in = (cur_pt.x - start_x) / lay.ppi.max(1.0);
-                    let max_w_in = (self.doc.page.width - self.doc.page.margin_left - self.doc.page.margin_right).max(1.0);
-                    let new_w = (start_w + dx_in).clamp(0.4, max_w_in);
-                    self.doc.table_resize_col(tid, r_idx, c_idx, new_w);
-                    self.rev += 1;
-                    self.dirty = true;
+        match self.drag {
+            CanvasDrag::ResizingTableCol {
+                table_id: tid,
+                row: r_idx,
+                col: c_idx,
+                start_x,
+                start_w_in: start_w,
+            } => {
+                if ui.input(|i| i.pointer.primary_down()) {
+                    if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                        let dx_in = (cur_pt.x - start_x) / lay.ppi.max(1.0);
+                        let max_w_in = (self.doc.page.width - self.doc.page.margin_left - self.doc.page.margin_right).max(1.0);
+                        let new_w = (start_w + dx_in).clamp(0.4, max_w_in);
+                        self.doc.table_resize_col(tid, r_idx, c_idx, new_w);
+                        self.rev += 1;
+                        self.dirty = true;
+                    }
+                    handled_table_edge = true;
+                } else {
+                    self.drag = CanvasDrag::Idle;
                 }
-                handled_table_edge = true;
-            } else {
-                self.resizing_table_col = None;
             }
-        }
-        if let Some((tid, r_idx, start_y, start_h_pt)) = self.resizing_table_row {
-            if ui.input(|i| i.pointer.primary_down()) {
-                if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
-                    let pt = (lay.ppi / 72.0).max(0.1);
-                    let dy_pt = (cur_pt.y - start_y) / pt;
-                    let new_h_pt = (start_h_pt + dy_pt).clamp(12.0, 600.0);
-                    self.doc.table_resize_row(tid, r_idx, new_h_pt);
-                    self.rev += 1;
-                    self.dirty = true;
+            CanvasDrag::ResizingTableRow {
+                table_id: tid,
+                row: r_idx,
+                start_y,
+                start_h_pt,
+            } => {
+                if ui.input(|i| i.pointer.primary_down()) {
+                    if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
+                        let pt = (lay.ppi / 72.0).max(0.1);
+                        let dy_pt = (cur_pt.y - start_y) / pt;
+                        let new_h_pt = (start_h_pt + dy_pt).clamp(12.0, 600.0);
+                        self.doc.table_resize_row(tid, r_idx, new_h_pt);
+                        self.rev += 1;
+                        self.dirty = true;
+                    }
+                    handled_table_edge = true;
+                } else {
+                    self.drag = CanvasDrag::Idle;
                 }
-                handled_table_edge = true;
-            } else {
-                self.resizing_table_row = None;
             }
+            _ => {}
         }
 
         // Clicking a column header pill or row header pill selects the entire column or row!
         let mut clicked_table_hdr = false;
-        if !handled_table_edge && self.resizing_image.is_none() && (resp.clicked() || ui.input(|i| i.pointer.primary_pressed())) {
+        if !handled_table_edge && !self.drag.is_resizing_image() && (resp.clicked() || ui.input(|i| i.pointer.primary_pressed())) {
             if let Some((tid, col_idx)) = hover_col_hdr {
                 self.select_table_col(tid, col_idx);
                 clicked_table_hdr = true;
@@ -1821,7 +2643,7 @@ impl Tab {
         }
 
         // Start or continue dragging an image resize handle
-        if self.resizing_image.is_none()
+        if self.drag.is_idle()
             && opts.mode != DocMode::Viewing
             && (ui.input(|i| i.pointer.primary_pressed()) || resp.drag_started())
         {
@@ -1830,11 +2652,24 @@ impl Tab {
                     let (w0, h0) = (img.width_in, img.height_in);
                     self.checkpoint(EditKind::Other, now);
                     self.selected_image = Some(img_id);
-                    self.resizing_image = Some((img_id, hi, start_pt, w0, h0));
+                    self.drag = CanvasDrag::ResizingImage {
+                        id: img_id,
+                        handle: hi,
+                        start_pos: start_pt,
+                        w0_in: w0,
+                        h0_in: h0,
+                    };
                 }
             }
         }
-        if let Some((img_id, hi, start_pt, w0, h0)) = self.resizing_image {
+        if let CanvasDrag::ResizingImage {
+            id: img_id,
+            handle: hi,
+            start_pos: start_pt,
+            w0_in: w0,
+            h0_in: h0,
+        } = self.drag
+        {
             if ui.input(|i| i.pointer.primary_down()) {
                 if let Some(cur_pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) {
                     let dx_in = (cur_pt.x - start_pt.x) / lay.ppi.max(1.0);
@@ -1873,24 +2708,29 @@ impl Tab {
                     }
                 }
             } else {
-                self.resizing_image = None;
+                self.drag = CanvasDrag::Idle;
             }
         }
 
         let over_checkbox = hover_pos.is_some_and(|hp| checkbox_rects.iter().any(|(_, r)| r.contains(hp)));
         let over_image = hover_pos.is_some_and(|hp| image_rects.iter().any(|(_, _, _, fr)| fr.contains(hp)));
-        let cursor_icon = if let Some((_, hi, ..)) = self.resizing_image {
-            handle_cursor(hi)
-        } else if let Some((_, hi, _)) = hover_handle {
-            handle_cursor(hi)
-        } else if self.resizing_table_col.is_some() || hover_col_edge.is_some() {
-            egui::CursorIcon::ResizeHorizontal
-        } else if self.resizing_table_row.is_some() || hover_row_edge.is_some() {
-            egui::CursorIcon::ResizeVertical
-        } else if hover_col_hdr.is_some() || hover_row_hdr.is_some() || over_checkbox || over_image {
-            egui::CursorIcon::PointingHand
-        } else {
-            egui::CursorIcon::Text
+        let cursor_icon = match self.drag {
+            CanvasDrag::ResizingImage { handle, .. } => handle_cursor(handle),
+            CanvasDrag::ResizingTableCol { .. } => egui::CursorIcon::ResizeHorizontal,
+            CanvasDrag::ResizingTableRow { .. } => egui::CursorIcon::ResizeVertical,
+            CanvasDrag::Idle | CanvasDrag::SelectingCells { .. } => {
+                if let Some((_, hi, _)) = hover_handle {
+                    handle_cursor(hi)
+                } else if hover_col_edge.is_some() {
+                    egui::CursorIcon::ResizeHorizontal
+                } else if hover_row_edge.is_some() {
+                    egui::CursorIcon::ResizeVertical
+                } else if hover_col_hdr.is_some() || hover_row_hdr.is_some() || over_checkbox || over_image {
+                    egui::CursorIcon::PointingHand
+                } else {
+                    egui::CursorIcon::Text
+                }
+            }
         };
         let resp = resp.on_hover_cursor(cursor_icon);
 
@@ -1899,7 +2739,7 @@ impl Tab {
             ui.memory_mut(|m| m.request_focus(focus_id));
         }
         let mut toggled_checkbox = false;
-        if resp.clicked() && opts.mode != DocMode::Viewing && self.resizing_image.is_none() {
+        if resp.clicked() && opts.mode != DocMode::Viewing && !self.drag.is_resizing_image() {
             if let Some(pp) = resp.interact_pointer_pos() {
                 if let Some((pi, _)) = checkbox_rects.iter().find(|(_, r)| r.contains(pp)) {
                     self.checkpoint(EditKind::Other, now);
@@ -1911,7 +2751,7 @@ impl Tab {
             }
         }
         let mut clicked_image = false;
-        if !toggled_checkbox && self.resizing_image.is_none() && hover_handle.is_none() {
+        if !toggled_checkbox && !self.drag.is_resizing_image() && hover_handle.is_none() {
             if let Some(pp) = resp.interact_pointer_pos() {
                 if let Some(&(pi, img_id, _, _)) = image_rects.iter().find(|(_, _, _, fr)| fr.expand(4.0).contains(pp)) {
                     if resp.clicked() || resp.double_clicked() || ui.input(|i| i.pointer.primary_pressed()) {
@@ -1951,9 +2791,7 @@ impl Tab {
             && !clicked_hf_margin
             && !handled_table_edge
             && !clicked_table_hdr
-            && self.resizing_image.is_none()
-            && self.resizing_table_col.is_none()
-            && self.resizing_table_row.is_none()
+            && matches!(self.drag, CanvasDrag::Idle | CanvasDrag::SelectingCells { .. })
         {
             if let Some(pp) = resp.interact_pointer_pos() {
                 ui.memory_mut(|m| m.request_focus(focus_id));
@@ -1975,9 +2813,24 @@ impl Tab {
                     self.selected_cells.clear();
                 } else if ui.input(|i| i.pointer.primary_pressed()) {
                     self.set_caret(pos, shift);
-                    self.drag_cell_anchor = hit_cell_coord;
+                    self.drag = match hit_cell_coord {
+                        Some((table_id, anchor_row, anchor_col)) => CanvasDrag::SelectingCells {
+                            table_id,
+                            anchor_row,
+                            anchor_col,
+                        },
+                        None => CanvasDrag::Idle,
+                    };
                 } else if resp.dragged() {
-                    if let (Some((t0, r0, c0)), Some((t1, r1, c1))) = (self.drag_cell_anchor, hit_cell_coord) {
+                    if let (
+                        CanvasDrag::SelectingCells {
+                            table_id: t0,
+                            anchor_row: r0,
+                            anchor_col: c0,
+                        },
+                        Some((t1, r1, c1)),
+                    ) = (self.drag, hit_cell_coord)
+                    {
                         if t0 == t1 && (r0 != r1 || c0 != c1) {
                             let mut sel = Vec::new();
                             for r in r0.min(r1)..=r0.max(r1) {
@@ -2004,8 +2857,8 @@ impl Tab {
                 self.scroll_to_caret = false;
             }
         }
-        if !ui.input(|i| i.pointer.primary_down()) {
-            self.drag_cell_anchor = None;
+        if !ui.input(|i| i.pointer.primary_down()) && matches!(self.drag, CanvasDrag::SelectingCells { .. }) {
+            self.drag = CanvasDrag::Idle;
         }
 
         // right click: move the caret there unless it lands inside the selection
@@ -2280,7 +3133,7 @@ impl Tab {
                 painter.rect_filled(Rect::from_min_size(pos2(o.x - 12.0, o.y), vec2(3.5, l.height)), 1.5, th.accent);
             }
             // Horizontal rule divider
-            if pfmt.hr && l.first_in_para {
+            if matches!(pfmt.block_kind(), crate::doc::BlockKind::HorizontalRule) && l.first_in_para {
                 let y_mid = o.y + l.height * 0.5;
                 let hr_col = pfmt.hr_color.map_or(Color32::from_gray(185), layout::color);
                 let hr_w = if pfmt.hr_width_pt > 0.0 {
@@ -2364,17 +3217,17 @@ impl Tab {
                                 th.accent.gamma_multiply(0.85),
                             );
                         }
-                        if is_sel || is_hov || self.resizing_image.is_some_and(|(id, ..)| id == pfmt.image_id) {
+                        if is_sel || is_hov || self.drag.resizing_image_id() == Some(pfmt.image_id) {
                             let stroke_w = if is_sel { 2.0 } else { 1.2 };
                             painter.rect_stroke(img_r, 2.0, Stroke::new(stroke_w, th.accent), StrokeKind::Outside);
                             for (hi, hpt) in image_handle_points(img_r).into_iter().enumerate() {
                                 let hr = Rect::from_center_size(hpt, vec2(8.5, 8.5));
-                                let active_h = self.resizing_image.is_some_and(|(id, idx, ..)| id == pfmt.image_id && idx == hi as u8)
+                                let active_h = self.drag.resizing_image_handle() == Some((pfmt.image_id, hi as u8))
                                     || hover_handle.is_some_and(|(id, idx, _)| id == pfmt.image_id && idx == hi as u8);
                                 painter.rect_filled(hr, 2.0, if active_h { th.accent } else { Color32::WHITE });
                                 painter.rect_stroke(hr, 2.0, Stroke::new(1.5, th.accent), StrokeKind::Inside);
                             }
-                            if is_sel || self.resizing_image.is_some_and(|(id, ..)| id == pfmt.image_id) {
+                            if is_sel || self.drag.resizing_image_id() == Some(pfmt.image_id) {
                                 let dim_txt = format!("{:.2} × {:.2} in", doc_img.width_in, doc_img.height_in);
                                 let badge_rect = Rect::from_min_size(
                                     pos2((img_r.max.x - 94.0).max(img_r.min.x + 4.0), (img_r.max.y - 24.0).max(img_r.min.y + 4.0)),
@@ -2480,11 +3333,16 @@ impl Tab {
                     }
                 }
             }
-            if pfmt.table_id > 0 {
+            if let crate::doc::BlockKind::TableCell {
+                table_id,
+                row,
+                col,
+            } = pfmt.block_kind()
+            {
                 if let Some(cell) = lay
                     .cells
                     .iter()
-                    .find(|c| c.table_id == pfmt.table_id && c.row == pfmt.table_row && c.col == pfmt.table_col && c.page == l.page)
+                    .find(|c| c.table_id == table_id && c.row == row && c.col == col && c.page == l.page)
                 {
                     if !cell.wrap_text {
                         let page_origin = canvas.min + lay.page_origin(l.page, canvas.width()).to_vec2() + lay.content_offset;
@@ -2586,7 +3444,13 @@ impl Tab {
             if let Some((_, _, y_scr, x0, x1)) = hover_row_edge {
                 painter.line_segment([pos2(x0, y_scr), pos2(x1, y_scr)], Stroke::new(2.4, th.accent));
             }
-            if let Some((tid, r_idx, c_idx, ..)) = self.resizing_table_col {
+            if let CanvasDrag::ResizingTableCol {
+                table_id: tid,
+                row: r_idx,
+                col: c_idx,
+                ..
+            } = self.drag
+            {
                 if let Some(&(_, _, _, cr)) = cell_screen_rects
                     .iter()
                     .find(|&&(t, r, c, _)| t == tid && r as usize == r_idx && c as usize == c_idx)
@@ -2609,7 +3473,12 @@ impl Tab {
                     );
                 }
             }
-            if let Some((tid, r_idx, ..)) = self.resizing_table_row {
+            if let CanvasDrag::ResizingTableRow {
+                table_id: tid,
+                row: r_idx,
+                ..
+            } = self.drag
+            {
                 if let Some(&(_, _, _, cr)) = cell_screen_rects
                     .iter()
                     .find(|&&(t, r, _, _)| t == tid && r as usize == r_idx)
@@ -2921,5 +3790,83 @@ mod tests {
         let (dw, dh, drgba) = r_img.decode_rgba().expect("decode restored rgba");
         assert_eq!((dw, dh), (40, 20));
         assert_eq!(&drgba[0..4], &[43, 87, 151, 255]);
+    }
+
+    #[test]
+    fn table_tab_arrows_and_backspace_stay_inside_cells() {
+        let mut t = Tab::new(1, "TableTest".into(), Document::default());
+        let first_pos = t.doc.insert_table(Pos::new(0, 0), 2, 2);
+        let tid = t.doc.paras[first_pos.p].fmt.table_id;
+        assert!(tid > 0);
+        t.set_caret(first_pos, false);
+
+        // Populate cells (0,0)="A1", (0,1)="B1", (1,0)="A2", (1,1)="B2" via Tab navigation
+        t.insert("A1", 1.0);
+        assert!(t.tab_in_table(false, 2.0));
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (0, 1));
+        t.insert("B1", 2.1);
+
+        assert!(t.tab_in_table(false, 3.0));
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (1, 0));
+        t.insert("A2", 3.1);
+
+        assert!(t.tab_in_table(false, 4.0));
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (1, 1));
+        t.insert("B2", 4.1);
+
+        // Tab on the very last cell (1,1) appends row 2 and moves into (2,0)
+        assert!(t.tab_in_table(false, 5.0));
+        assert_eq!(t.doc.table(tid).unwrap().rows.len(), 3);
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (2, 0));
+
+        // Shift+Tab moves back to (1,1) -> (1,0) -> (0,1)
+        assert!(t.tab_in_table(true, 6.0));
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (1, 1));
+        assert!(t.tab_in_table(true, 7.0));
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (1, 0));
+        assert!(t.tab_in_table(true, 8.0));
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (0, 1));
+
+        // Backspace at col 0 of cell (0,1) MUST NOT merge into (0,0) or jump caret
+        t.set_caret(Pos::new(t.caret.p, 0), false);
+        t.backspace(false, 9.0);
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (0, 1));
+        assert_eq!(t.doc.cell_text(tid, 0, 0), "A1");
+        assert_eq!(t.doc.cell_text(tid, 0, 1), "B1");
+
+        // Delete at end of cell (0,0) MUST NOT swallow (0,1)
+        let p00 = t.doc.table_cell_para(tid, 0, 0).unwrap();
+        t.set_caret(Pos::new(p00, 2), false);
+        t.delete_forward(false, 10.0);
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (0, 0));
+        assert_eq!(t.doc.cell_text(tid, 0, 0), "A1");
+        assert_eq!(t.doc.cell_text(tid, 0, 1), "B1");
+
+        // ArrowDown from (0,0) must move vertically to (1,0), NOT sideways to (0,1)
+        let ctx = egui::Context::default();
+        let book = crate::fonts::FontBook::default();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            let lay = layout::build(&ctx, &t.doc, &book, 1.0, false);
+            t.move_vert(&lay, 1, false);
+        });
+        out.textures_delta.clear();
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (1, 0));
+
+        // ArrowUp from (1,0) must move straight back to (0,0)
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            let lay = layout::build(&ctx, &t.doc, &book, 1.0, false);
+            t.move_vert(&lay, -1, false);
+        });
+        out.textures_delta.clear();
+        assert_eq!((t.doc.paras[t.caret.p].fmt.table_row, t.doc.paras[t.caret.p].fmt.table_col), (0, 0));
+
+        // Cross-cell range deletion clears text in both cells without destroying cell paragraphs
+        let p01 = t.doc.table_cell_para(tid, 0, 1).unwrap();
+        t.anchor = Pos::new(p00, 1);
+        t.caret = Pos::new(p01, 1);
+        t.backspace(false, 11.0);
+        assert_eq!(t.doc.cell_text(tid, 0, 0), "A");
+        assert_eq!(t.doc.cell_text(tid, 0, 1), "1");
+        assert!(t.doc.table_cell_para(tid, 0, 1).is_some());
     }
 }

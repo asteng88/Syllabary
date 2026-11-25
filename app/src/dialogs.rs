@@ -58,6 +58,8 @@ pub enum Dialog {
         keep_sig_figs: bool,
         /// Some(expression) = arithmetic mode (`B2*C2`, `(D2+D3)/B2`, …)
         expr: Option<String>,
+        /// When true, clicking any cell in the dialog grid reassigns `(row, col)` to that cell.
+        picking_target: bool,
     },
 }
 
@@ -1069,28 +1071,30 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         }
         Dialog::TableMath {
             table_id,
-            row,
-            col,
+            mut row,
+            mut col,
             mut op,
             mut use_above,
             mut use_left,
             mut chosen,
             mut keep_sig_figs,
             mut expr,
+            mut picking_target,
         } => {
             table_math_dialog(
                 app,
                 ctx,
                 &mut open,
                 table_id,
-                row,
-                col,
+                &mut row,
+                &mut col,
                 &mut op,
                 &mut use_above,
                 &mut use_left,
                 &mut chosen,
                 &mut keep_sig_figs,
                 &mut expr,
+                &mut picking_target,
             );
             if open && matches!(app.dialog, Dialog::TableMath { .. }) {
                 app.dialog = Dialog::TableMath {
@@ -1103,6 +1107,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     chosen,
                     keep_sig_figs,
                     expr,
+                    picking_target,
                 };
             }
         }
@@ -1769,79 +1774,81 @@ fn print_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, cfg: &mut c
 }
 
 fn confirmations(app: &mut App, ctx: &egui::Context) {
-    if let Some(idx) = app.confirm_close {
-        let name = app.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
-        let mut choice = 0;
-        egui::Modal::new(egui::Id::unique("confirm-close")).show(ctx, |ui| {
-            ui.set_max_width(380.0);
-            ui.heading("Save changes?");
-            ui.label(format!("\"{name}\" has changes that haven't been saved."));
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    choice = 1;
-                }
-                if ui.button("Don't save").clicked() {
-                    choice = 2;
-                }
-                if ui.button("Cancel").clicked() {
-                    choice = 3;
-                }
+    match app.close_flow {
+        crate::app::CloseFlow::None | crate::app::CloseFlow::ForceQuit => {}
+        crate::app::CloseFlow::ConfirmTab(idx) => {
+            let name = app.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
+            let mut choice = 0;
+            egui::Modal::new(egui::Id::unique("confirm-close")).show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                ui.heading("Save changes?");
+                ui.label(format!("\"{name}\" has changes that haven't been saved."));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = 1;
+                    }
+                    if ui.button("Don't save").clicked() {
+                        choice = 2;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = 3;
+                    }
+                });
             });
-        });
-        match choice {
-            1 => {
-                app.confirm_close = None;
-                app.save_then_close(idx);
+            match choice {
+                1 => {
+                    app.close_flow = crate::app::CloseFlow::None;
+                    app.save_then_close(idx);
+                }
+                2 => {
+                    app.close_flow = crate::app::CloseFlow::None;
+                    app.close_tab(idx, true);
+                }
+                3 => app.close_flow = crate::app::CloseFlow::None,
+                _ => {}
             }
-            2 => {
-                app.confirm_close = None;
-                app.close_tab(idx, true);
-            }
-            3 => app.confirm_close = None,
-            _ => {}
         }
-    }
-    if app.confirm_quit {
-        let n = app.tabs.iter().filter(|t| t.dirty).count();
-        let mut choice = 0;
-        egui::Modal::new(egui::Id::unique("confirm-quit")).show(ctx, |ui| {
-            ui.set_max_width(400.0);
-            ui.heading("Unsaved documents");
-            ui.label(format!("{n} document(s) have changes that haven't been saved."));
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Save all").clicked() {
-                    choice = 1;
-                }
-                if ui.button("Quit without saving").clicked() {
-                    choice = 2;
-                }
-                if ui.button("Cancel").clicked() {
-                    choice = 3;
-                }
+        crate::app::CloseFlow::ConfirmQuit => {
+            let n = app.tabs.iter().filter(|t| t.dirty).count();
+            let mut choice = 0;
+            egui::Modal::new(egui::Id::unique("confirm-quit")).show(ctx, |ui| {
+                ui.set_max_width(400.0);
+                ui.heading("Unsaved documents");
+                ui.label(format!("{n} document(s) have changes that haven't been saved."));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save all").clicked() {
+                        choice = 1;
+                    }
+                    if ui.button("Quit without saving").clicked() {
+                        choice = 2;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = 3;
+                    }
+                });
             });
-        });
-        match choice {
-            1 => {
-                app.confirm_quit = false;
-                let mut ok = true;
-                for i in 0..app.tabs.len() {
-                    if app.tabs[i].dirty && !app.save(i, false) {
-                        ok = false;
-                        break;
+            match choice {
+                1 => {
+                    app.close_flow = crate::app::CloseFlow::None;
+                    let mut ok = true;
+                    for i in 0..app.tabs.len() {
+                        if app.tabs[i].dirty && !app.save(i, false) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        app.force_quit(ctx);
                     }
                 }
-                if ok {
+                2 => {
                     app.force_quit(ctx);
                 }
+                3 => app.close_flow = crate::app::CloseFlow::None,
+                _ => {}
             }
-            2 => {
-                app.confirm_quit = false;
-                app.force_quit(ctx);
-            }
-            3 => app.confirm_quit = false,
-            _ => {}
         }
     }
 }
@@ -2644,26 +2651,60 @@ fn insert_table_dialog(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "Table math dialog binds operation, range mode, chosen cells, and sig-fig option")]
+/// Updates the Table Cell Math target cell while preventing self-references and
+/// keeping `ABOVE`/`LEFT` sensible when moving to row 0 or column 0.
+pub(crate) fn set_table_math_target(
+    new_row: usize,
+    new_col: usize,
+    target_row: &mut usize,
+    target_col: &mut usize,
+    use_above: &mut bool,
+    use_left: &mut bool,
+    chosen: &mut Vec<(usize, usize)>,
+    picking_target: &mut bool,
+) {
+    *target_row = new_row;
+    *target_col = new_col;
+    chosen.retain(|&rc| rc != (new_row, new_col));
+    if *use_above && new_row == 0 {
+        *use_above = false;
+        *use_left = new_col > 0;
+    } else if *use_left && new_col == 0 {
+        *use_left = false;
+        *use_above = new_row > 0;
+    }
+    *picking_target = false;
+}
+
+#[expect(clippy::too_many_arguments, reason = "Table math dialog binds target cell, operation, range mode, chosen cells, and sig-fig option")]
 fn table_math_dialog(
     app: &mut App,
     ctx: &egui::Context,
     open: &mut bool,
     table_id: u32,
-    target_row: usize,
-    target_col: usize,
+    target_row: &mut usize,
+    target_col: &mut usize,
     op: &mut TableMathOp,
     use_above: &mut bool,
     use_left: &mut bool,
     chosen: &mut Vec<(usize, usize)>,
     keep_sig_figs: &mut bool,
     expr: &mut Option<String>,
+    picking_target: &mut bool,
 ) {
     let Some(tbl_snap) = app.tab_ref().doc.table(table_id).cloned() else {
         *open = false;
         return;
     };
-    let target_label = cell_coord_label(target_row, target_col);
+    if tbl_snap.rows.is_empty() {
+        *open = false;
+        return;
+    }
+    *target_row = (*target_row).min(tbl_snap.rows.len() - 1);
+    let max_col = tbl_snap.rows[*target_row].cells.len().saturating_sub(1);
+    *target_col = (*target_col).min(max_col);
+
+    let target_label = cell_coord_label(*target_row, *target_col);
     let mut apply_formula: Option<Option<String>> = None;
     let mut cancel_clicked = false;
 
@@ -2696,7 +2737,7 @@ fn table_math_dialog(
     } else {
         app.tab_ref()
             .doc
-            .preview_table_formula(table_id, target_row, target_col, &built_formula)
+            .preview_table_formula(table_id, *target_row, *target_col, &built_formula)
             .unwrap_or_else(|| {
                 if expr.is_some() {
                     "(incomplete formula)".to_string()
@@ -2710,7 +2751,7 @@ fn table_math_dialog(
             || app
                 .tab_ref()
                 .doc
-                .preview_table_formula(table_id, target_row, target_col, &built_formula)
+                .preview_table_formula(table_id, *target_row, *target_col, &built_formula)
                 .is_some());
 
     window(&format!("Table Cell Math — Cell {target_label}"))
@@ -2723,6 +2764,50 @@ fn table_math_dialog(
                     .small(),
             );
             ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Target Cell:").strong());
+                egui::ComboBox::from_id_salt("tbl-math-target")
+                    .selected_text(format!("🎯 {target_label}"))
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        for (r_idx, row_spec) in tbl_snap.rows.iter().enumerate() {
+                            for (c_idx, _cell_spec) in row_spec.cells.iter().enumerate() {
+                                let coord = cell_coord_label(r_idx, c_idx);
+                                let raw_txt = app.tab_ref().doc.cell_text(table_id, r_idx, c_idx);
+                                let short_txt: String = raw_txt.trim().chars().take(12).collect();
+                                let item_lbl = if short_txt.is_empty() {
+                                    coord
+                                } else {
+                                    format!("{coord}: {short_txt}")
+                                };
+                                if ui
+                                    .selectable_label((r_idx, c_idx) == (*target_row, *target_col), item_lbl)
+                                    .clicked()
+                                {
+                                    set_table_math_target(
+                                        r_idx,
+                                        c_idx,
+                                        target_row,
+                                        target_col,
+                                        use_above,
+                                        use_left,
+                                        chosen,
+                                        picking_target,
+                                    );
+                                }
+                            }
+                        }
+                    });
+                if ui
+                    .selectable_label(*picking_target, "🎯 Pick Target in Grid")
+                    .on_hover_text("Click any cell in the grid below to move the target there (or right-click any cell anytime)")
+                    .clicked()
+                {
+                    *picking_target = !*picking_target;
+                }
+            });
+            ui.add_space(4.0);
 
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Calculation:").strong());
@@ -2793,13 +2878,13 @@ fn table_math_dialog(
                 {
                     if *use_above {
                         chosen.clear();
-                        for r in 0..target_row {
-                            chosen.push((r, target_col));
+                        for r in 0..*target_row {
+                            chosen.push((r, *target_col));
                         }
                     } else if *use_left {
                         chosen.clear();
-                        for c in 0..target_col {
-                            chosen.push((target_row, c));
+                        for c in 0..*target_col {
+                            chosen.push((*target_row, c));
                         }
                     }
                     *use_above = false;
@@ -2808,11 +2893,20 @@ fn table_math_dialog(
             }); }
 
             ui.add_space(4.0);
-            ui.label(
-                RichText::new("Click cells in the table preview below to include/exclude them from the calculation:")
-                    .weak()
-                    .small(),
-            );
+            if *picking_target {
+                ui.label(
+                    RichText::new("Click any cell in the table preview below to set it as the Target Cell:")
+                        .color(app.theme.accent)
+                        .strong()
+                        .small(),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Click cells below to include/exclude them • Right-click any cell to set it as the Target Cell:")
+                        .weak()
+                        .small(),
+                );
+            }
             egui::ScrollArea::both()
                 .id_salt("tbl-math-cell-picker")
                 .max_height(180.0)
@@ -2823,27 +2917,49 @@ fn table_math_dialog(
                                 let coord = cell_coord_label(r_idx, c_idx);
                                 let raw_txt = app.tab_ref().doc.cell_text(table_id, r_idx, c_idx);
                                 let short_txt: String = raw_txt.trim().chars().take(12).collect();
-                                let display = if (r_idx, c_idx) == (target_row, target_col) {
+                                let is_target = (r_idx, c_idx) == (*target_row, *target_col);
+                                let display = if is_target {
                                     format!("🎯 {coord} (Target)")
                                 } else if short_txt.is_empty() {
                                     format!("{coord}: —")
                                 } else {
                                     format!("{coord}: {short_txt}")
                                 };
-                                let is_target = (r_idx, c_idx) == (target_row, target_col);
-                                let is_selected = if is_target {
+                                let is_selected = if *picking_target {
+                                    is_target
+                                } else if is_target {
                                     false
                                 } else if let Some(e) = expr.as_ref() {
                                     e.to_ascii_uppercase().contains(&coord)
                                 } else if *use_above {
-                                    c_idx == target_col && r_idx < target_row
+                                    c_idx == *target_col && r_idx < *target_row
                                 } else if *use_left {
-                                    r_idx == target_row && c_idx < target_col
+                                    r_idx == *target_row && c_idx < *target_col
                                 } else {
                                     chosen.contains(&(r_idx, c_idx))
                                 };
-                                let btn = ui.add_enabled(!is_target, egui::Button::new(&display).selected(is_selected));
-                                if btn.clicked() && expr.is_some() {
+                                let tip = if *picking_target {
+                                    "Click to set as Target Cell"
+                                } else if is_target {
+                                    "Current Target Cell (result will be written here)"
+                                } else {
+                                    "Click to include/exclude • Right-click to set as Target Cell"
+                                };
+                                let btn = ui
+                                    .add_enabled(*picking_target || !is_target, egui::Button::new(&display).selected(is_selected))
+                                    .on_hover_text(tip);
+                                if (*picking_target && btn.clicked()) || btn.secondary_clicked() {
+                                    set_table_math_target(
+                                        r_idx,
+                                        c_idx,
+                                        target_row,
+                                        target_col,
+                                        use_above,
+                                        use_left,
+                                        chosen,
+                                        picking_target,
+                                    );
+                                } else if btn.clicked() && expr.is_some() {
                                     if let Some(e) = expr.as_mut() {
                                         // two references in a row need an operator between them
                                         if e.trim_end().chars().last().is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == ')') {
@@ -2854,14 +2970,14 @@ fn table_math_dialog(
                                 } else if btn.clicked() {
                                     if *use_above {
                                         chosen.clear();
-                                        for rr in 0..target_row {
-                                            chosen.push((rr, target_col));
+                                        for rr in 0..*target_row {
+                                            chosen.push((rr, *target_col));
                                         }
                                         *use_above = false;
                                     } else if *use_left {
                                         chosen.clear();
-                                        for cc in 0..target_col {
-                                            chosen.push((target_row, cc));
+                                        for cc in 0..*target_col {
+                                            chosen.push((*target_row, cc));
                                         }
                                         *use_left = false;
                                     }
@@ -2916,7 +3032,15 @@ fn table_math_dialog(
     if let Some(f_opt) = apply_formula {
         let t = app.tab();
         t.checkpoint(EditKind::Other, ctx.input(|i| i.time));
-        t.doc.table_set_cell_formula(table_id, target_row, target_col, f_opt);
+        t.doc.table_set_cell_formula(table_id, *target_row, *target_col, f_opt);
+        if let Some(pi) = t.doc.paras.iter().position(|p| {
+            p.fmt.table_id == table_id
+                && p.fmt.table_row as usize == *target_row
+                && p.fmt.table_col as usize == *target_col
+        }) {
+            let end_c = t.doc.paras[pi].len();
+            t.set_caret(Pos::new(pi, end_c), false);
+        }
         t.changed();
         *open = false;
     } else if cancel_clicked {

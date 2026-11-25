@@ -31,10 +31,21 @@ foreach ($ext in $Extensions) {
     $extKey = "HKCU:\Software\Classes\.$k"
     New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
     Set-ItemProperty -Path "$extKey\OpenWithProgids" -Name $progId -Value ""
-    if ($k -eq "wpx") {
-        Set-ItemProperty -Path $extKey -Name "(Default)" -Value $progId
-    }
+    Set-ItemProperty -Path $extKey -Name "(Default)" -Value $progId
     Write-Host "Registered .$k -> $progId (icon index $($info.IconIdx))"
+}
+
+# Register Syllabary under Applications\syllabary.exe so Windows "Open with" & Default Apps list it cleanly
+$appBase = "HKCU:\Software\Classes\Applications\syllabary.exe"
+New-Item -Path "$appBase\DefaultIcon" -Force | Out-Null
+New-Item -Path "$appBase\shell\open\command" -Force | Out-Null
+New-Item -Path "$appBase\SupportedTypes" -Force | Out-Null
+Set-ItemProperty -Path $appBase -Name "FriendlyAppName" -Value "Syllabary"
+Set-ItemProperty -Path "$appBase\DefaultIcon" -Name "(Default)" -Value "`"$ExePath`",0"
+Set-ItemProperty -Path "$appBase\shell\open\command" -Name "(Default)" -Value "`"$ExePath`" `"%1`""
+foreach ($ext in $Extensions) {
+    $k = $ext.TrimStart('.').ToLowerInvariant()
+    Set-ItemProperty -Path "$appBase\SupportedTypes" -Name ".$k" -Value ""
 }
 
 # Notify Windows Shell to refresh file-type icons immediately

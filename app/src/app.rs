@@ -150,6 +150,7 @@ pub enum Action {
     TableAutoFitRow,
     TableCellFormula(Option<String>),
     OpenTableMath,
+    SetPdfMode(crate::editor::PdfMode),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -228,6 +229,37 @@ pub struct UpdateState {
     pub phase: UpdatePhase,
 }
 
+/// Explicit close/quit confirmation lifecycle (replaces `confirm_close`, `confirm_quit`, `force_quit`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloseFlow {
+    #[default]
+    None,
+    ConfirmTab(usize),
+    ConfirmQuit,
+    ForceQuit,
+}
+
+impl CloseFlow {
+    pub fn is_confirming(self) -> bool {
+        matches!(self, CloseFlow::ConfirmTab(_) | CloseFlow::ConfirmQuit)
+    }
+}
+
+/// Explicit mutually-exclusive right-hand studio inspector drawer (replaces `show_comments` + `show_history`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RightPanel {
+    #[default]
+    None,
+    Comments,
+    VersionHistory,
+}
+
+impl RightPanel {
+    pub fn toggle(&mut self, target: RightPanel) {
+        *self = if *self == target { RightPanel::None } else { target };
+    }
+}
+
 pub struct App {
     pub egui_ctx: egui::Context,
     pub tabs: Vec<Tab>,
@@ -259,16 +291,13 @@ pub struct App {
     toast: Option<(String, f64)>,
     last_autosave: f64,
     title: String,
-    pub confirm_close: Option<usize>,
-    pub confirm_quit: bool,
-    force_quit: bool,
+    pub close_flow: CloseFlow,
     pub doc_id: egui::Id,
     view_size: egui::Vec2,
     fonts_rev: u64,
     pub speller: crate::spell::Speller,
     pub show_nav: bool,
-    pub show_comments: bool,
-    pub show_history: bool,
+    pub right_panel: RightPanel,
     pub history_sel_idx: usize,
     pub history_ver_name: String,
     pub mode: DocMode,
@@ -279,6 +308,7 @@ pub struct App {
     pub comment_reply_draft: (u64, String),
     pub wc_metric: u8,
     pub table_panel_collapsed: bool,
+    pub pdf_panel_collapsed: bool,
     pub update: UpdateState,
 }
 
@@ -323,16 +353,13 @@ impl App {
             toast: None,
             last_autosave: 0.0,
             title: String::new(),
-            confirm_close: None,
-            confirm_quit: false,
-            force_quit: false,
+            close_flow: CloseFlow::None,
             doc_id: egui::Id::unique("document-canvas"),
             view_size: vec2(1200.0, 800.0),
             fonts_rev: 1,
             speller: crate::spell::Speller::new(),
             show_nav: false,
-            show_comments: false,
-            show_history: false,
+            right_panel: RightPanel::None,
             history_sel_idx: 0,
             history_ver_name: String::new(),
             mode: DocMode::Editing,
@@ -343,6 +370,7 @@ impl App {
             comment_reply_draft: (0, String::new()),
             wc_metric: 0,
             table_panel_collapsed: false,
+            pdf_panel_collapsed: false,
             update: UpdateState::default(),
         };
         crate::updater::cleanup_old_executable_backup();
@@ -614,15 +642,45 @@ impl App {
         let is_pdf = path
             .extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"));
+        let mut saved_exact_pdf: Option<Vec<u8>> = None;
         let res = if is_pdf {
-            let bytes = crate::pdf::export(&self.egui_ctx, &self.tabs[idx].doc, &self.book);
-            std::fs::write(&path, bytes)
+            let exact_res = self.tabs[idx].pdf_view.as_ref().and_then(|pv| {
+                if pv.is_exact() {
+                    if pv.has_edits() {
+                        Some(crate::pdf::export_edited_pdf(
+                            pv.bytes.clone(),
+                            &pv.page_dims_pt,
+                            &pv.blocks,
+                        ))
+                    } else {
+                        Some(Ok((*pv.bytes).clone()))
+                    }
+                } else {
+                    None
+                }
+            });
+            match exact_res {
+                Some(Ok(bytes)) => {
+                    saved_exact_pdf = Some(bytes.clone());
+                    std::fs::write(&path, bytes)
+                }
+                Some(Err(err)) => Err(std::io::Error::other(err)),
+                None => {
+                    let bytes = crate::pdf::export(&self.egui_ctx, &self.tabs[idx].doc, &self.book);
+                    std::fs::write(&path, bytes)
+                }
+            }
         } else {
             Self::write_doc(&self.tabs[idx].doc, &path)
         };
         match res {
             Ok(()) => {
                 let t = &mut self.tabs[idx];
+                if let Some(new_bytes) = saved_exact_pdf {
+                    if let Some(pv) = t.pdf_view.as_mut() {
+                        pv.reload_saved(new_bytes);
+                    }
+                }
                 t.path = Some(path.clone());
                 t.name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 t.dirty = false;
@@ -647,7 +705,21 @@ impl App {
         let Some(path) = rfd::FileDialog::new().set_file_name(format!("{base}.pdf")).add_filter("PDF", &["pdf"]).save_file() else {
             return;
         };
-        let bytes = crate::pdf::export(ctx, &t.doc, &self.book);
+        let bytes = if let Some(pv) = t.pdf_view.as_ref().filter(|pv| pv.is_exact()) {
+            if pv.has_edits() {
+                match crate::pdf::export_edited_pdf(pv.bytes.clone(), &pv.page_dims_pt, &pv.blocks) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.toast(format!("Couldn't export PDF: {e}"));
+                        return;
+                    }
+                }
+            } else {
+                (*pv.bytes).clone()
+            }
+        } else {
+            crate::pdf::export(ctx, &t.doc, &self.book)
+        };
         match std::fs::write(&path, bytes) {
             Ok(()) => self.toast(format!("Exported to {}", path.display())),
             Err(e) => self.toast(format!("Couldn't write the PDF: {e}")),
@@ -696,7 +768,7 @@ impl App {
             return;
         }
         if self.tabs[idx].dirty && !force {
-            self.confirm_close = Some(idx);
+            self.close_flow = CloseFlow::ConfirmTab(idx);
             return;
         }
         remove_recovery(self.tabs[idx].id);
@@ -885,7 +957,7 @@ impl App {
     }
 
     pub fn force_quit(&mut self, ctx: &egui::Context) {
-        self.force_quit = true;
+        self.close_flow = CloseFlow::ForceQuit;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -1118,10 +1190,10 @@ impl App {
                     }
                 }
                 Action::ToggleNav => self.show_nav = !self.show_nav,
-                Action::ToggleComments => self.show_comments = !self.show_comments,
-                Action::ToggleHistory => self.show_history = !self.show_history,
+                Action::ToggleComments => self.right_panel.toggle(RightPanel::Comments),
+                Action::ToggleHistory => self.right_panel.toggle(RightPanel::VersionHistory),
                 Action::OpenNameVersion => {
-                    self.show_history = true;
+                    self.right_panel = RightPanel::VersionHistory;
                     if self.history_ver_name.trim().is_empty() {
                         self.history_ver_name = "Milestone".into();
                     }
@@ -1150,7 +1222,7 @@ impl App {
                 Action::SetMode(m) => {
                     self.mode = m;
                     if m == DocMode::Suggesting {
-                        self.show_comments = true;
+                        self.right_panel = RightPanel::Comments;
                     }
                     self.toast(format!("Mode: {}", m.label()));
                 }
@@ -1167,12 +1239,20 @@ impl App {
                     }
                     if let Some(i) = self.tabs.iter().position(|t| t.dirty) {
                         self.active = i;
-                        self.confirm_close = Some(i);
+                        self.close_flow = CloseFlow::ConfirmTab(i);
                     }
                 }
                 Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                Action::Undo => self.tab().undo(),
-                Action::Redo => self.tab().redo(),
+                Action::Undo => {
+                    if !self.tab().pdf_undo() {
+                        self.tab().undo();
+                    }
+                }
+                Action::Redo => {
+                    if !self.tab().pdf_redo() {
+                        self.tab().redo();
+                    }
+                }
                 Action::Cut | Action::Copy => {
                     let cut = matches!(a, Action::Cut);
                     let t = self.tab();
@@ -1393,7 +1473,7 @@ impl App {
                         });
                         t.dirty = true;
                         t.rev += 1;
-                        self.show_comments = true;
+                        self.right_panel = RightPanel::Comments;
                     }
                 }
                 Action::ResolveComment(id) => {
@@ -1772,6 +1852,14 @@ impl App {
                         t.changed();
                     }
                 }
+                Action::SetPdfMode(m) => {
+                    self.tab().set_pdf_mode(m);
+                    self.toast(match m {
+                        crate::editor::PdfMode::Read => "PDF Read mode".into(),
+                        crate::editor::PdfMode::Edit => "PDF Edit mode — click any text on the page to edit".into(),
+                        crate::editor::PdfMode::Reflow => "Switched to Reflowable document mode".into(),
+                    });
+                }
                 Action::OpenTableMath => {
                     let fmt = {
                         let t = self.tab_ref();
@@ -1856,6 +1944,7 @@ impl App {
                             chosen,
                             keep_sig_figs,
                             expr,
+                            picking_target: false,
                         };
                         refocus = false;
                     } else {
@@ -2302,9 +2391,9 @@ impl eframe::App for App {
         }
 
         // closing the window with unsaved work
-        if ctx.input(|i| i.viewport().close_requested()) && !self.force_quit && self.tabs.iter().any(|t| t.dirty) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.close_flow != CloseFlow::ForceQuit && self.tabs.iter().any(|t| t.dirty) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.confirm_quit = true;
+            self.close_flow = CloseFlow::ConfirmQuit;
         }
 
         // Esc exits clean screen
@@ -2349,6 +2438,7 @@ impl eframe::App for App {
 
         if self.show_toolbar && !self.clean_screen {
             egui::Panel::top("toolbar")
+                .max_size(140.0)
                 .frame(
                     Frame::new()
                         .fill(th.chrome)
@@ -2372,8 +2462,8 @@ impl eframe::App for App {
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(Margin::symmetric(10, 5))
                         .show(ui, |ui| {
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                                ui.spacing_mut().item_spacing.x = 2.5;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(2.5, 4.0);
                                 self.toolbar(ui, &th);
                             });
                         });
@@ -2396,26 +2486,30 @@ impl eframe::App for App {
                 });
         }
 
-        if self.show_comments && !self.clean_screen {
-            egui::Panel::right("comments")
-                .resizable(true)
-                .default_size(280.0)
-                .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
-                .show(ui, |ui| {
-                    self.comments_pane(ui, &th);
-                });
-        }
-
-        if self.show_history && !self.clean_screen {
-            egui::Panel::right("version-history")
-                .resizable(true)
-                .default_size(290.0)
-                .min_size(240.0)
-                .max_size(420.0)
-                .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
-                .show(ui, |ui| {
-                    self.history_pane(ui, &th, now);
-                });
+        if !self.clean_screen {
+            match self.right_panel {
+                RightPanel::Comments => {
+                    egui::Panel::right("comments")
+                        .resizable(true)
+                        .default_size(280.0)
+                        .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
+                        .show(ui, |ui| {
+                            self.comments_pane(ui, &th);
+                        });
+                }
+                RightPanel::VersionHistory => {
+                    egui::Panel::right("version-history")
+                        .resizable(true)
+                        .default_size(290.0)
+                        .min_size(240.0)
+                        .max_size(420.0)
+                        .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
+                        .show(ui, |ui| {
+                            self.history_pane(ui, &th, now);
+                        });
+                }
+                RightPanel::None => {}
+            }
         }
 
         // Docked Right-Hand Table Studio Panel (pops out when caret is inside a table, without overlapping the document or scrollbar)
@@ -2684,6 +2778,378 @@ impl eframe::App for App {
                 });
         }
 
+        // Contextual right-hand PDF Editor side panel when editing an exact PDF
+        let pdf_edit_active = !self.clean_screen
+            && self.tab_ref().pdf_mode() == Some(crate::editor::PdfMode::Edit);
+        if pdf_edit_active {
+            if !self.pdf_panel_collapsed {
+                egui::Panel::right("pdf-studio-panel")
+                    .resizable(true)
+                    .default_size(248.0)
+                    .min_size(220.0)
+                    .max_size(340.0)
+                    .frame(
+                        Frame::new()
+                            .fill(th.chrome)
+                            .inner_margin(Margin::symmetric(12, 10))
+                            .stroke(Stroke::new(1.0, th.border)),
+                    )
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("pdf-studio-scroll")
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 8.0;
+
+                                let (page_count, adding_box, sel_id, can_undo, can_redo, sel_info) = {
+                                    let pv = self.tab_ref().pdf_view.as_ref();
+                                    match pv {
+                                        Some(pv) => {
+                                            let info = pv.selected_block.and_then(|id| {
+                                                pv.blocks.iter().find(|b| b.id == id && !b.deleted).map(|b| {
+                                                    let (pw, ph) = pv
+                                                        .page_dims_pt
+                                                        .get(b.page)
+                                                        .copied()
+                                                        .unwrap_or((612.0, 792.0));
+                                                    (
+                                                        b.size_pt, b.bold, b.italic, b.align, b.color,
+                                                        b.x_pt, b.y_pt, b.w_pt, pw, ph, b.page,
+                                                    )
+                                                })
+                                            });
+                                            (
+                                                pv.page_dims_pt.len(),
+                                                pv.adding_text_box,
+                                                pv.selected_block,
+                                                !pv.undo.is_empty(),
+                                                !pv.redo.is_empty(),
+                                                info,
+                                            )
+                                        }
+                                        None => (0, false, None, false, false, None),
+                                    }
+                                };
+
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("PDF Editor").strong().size(14.0));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{page_count} pg{}",
+                                                if page_count == 1 { "" } else { "s" }
+                                            ))
+                                            .small()
+                                            .weak(),
+                                        );
+                                    });
+                                });
+                                ui.separator();
+
+                                // Insert new text box
+                                let add_btn = ui.add_sized(
+                                    vec2(ui.available_width(), 28.0),
+                                    egui::Button::new(
+                                        RichText::new(if adding_box {
+                                            "Click on PDF Page to Place…"
+                                        } else {
+                                            "+ Add Text Box"
+                                        })
+                                        .strong(),
+                                    )
+                                    .selected(adding_box),
+                                );
+                                if add_btn
+                                    .on_hover_text("Click anywhere on a PDF page to insert a new resizable text box")
+                                    .clicked()
+                                {
+                                    if let Some(pv) = self.tab().pdf_view.as_mut() {
+                                        pv.adding_text_box = !pv.adding_text_box;
+                                        if pv.adding_text_box {
+                                            pv.selected_block = None;
+                                        }
+                                    }
+                                }
+
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(can_undo, egui::Button::new("Undo")).clicked() {
+                                        self.tab().pdf_undo();
+                                    }
+                                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).clicked() {
+                                        self.tab().pdf_redo();
+                                    }
+                                });
+
+                                ui.separator();
+
+                                if let (
+                                    Some(id),
+                                    Some((
+                                        cur_sz,
+                                        cur_bold,
+                                        cur_italic,
+                                        cur_align,
+                                        cur_col,
+                                        cur_x,
+                                        cur_y,
+                                        cur_w,
+                                        pw,
+                                        ph,
+                                        pg_idx,
+                                    )),
+                                ) = (sel_id, sel_info)
+                                {
+                                    ui.label(
+                                        RichText::new(format!("Selected Text Box (Page {})", pg_idx + 1))
+                                            .size(11.5)
+                                            .color(th.subtle)
+                                            .strong(),
+                                    );
+
+                                    // Typography: Size, Bold, Italic
+                                    let mut new_sz = cur_sz;
+                                    let mut toggle_bold = false;
+                                    let mut toggle_italic = false;
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("A−").clicked() {
+                                            new_sz = (cur_sz - 1.0).clamp(6.0, 96.0);
+                                        }
+                                        ui.add(
+                                            egui::DragValue::new(&mut new_sz)
+                                                .speed(0.25)
+                                                .range(6.0..=96.0)
+                                                .fixed_decimals(0)
+                                                .suffix(" pt"),
+                                        );
+                                        if ui.small_button("A+").clicked() {
+                                            new_sz = (cur_sz + 1.0).clamp(6.0, 96.0);
+                                        }
+                                        if ui.selectable_label(cur_bold, RichText::new("B").strong()).clicked() {
+                                            toggle_bold = true;
+                                        }
+                                        if ui.selectable_label(cur_italic, RichText::new("I").italics()).clicked() {
+                                            toggle_italic = true;
+                                        }
+                                    });
+
+                                    // Alignment (Left, Center, Right, Justify)
+                                    let mut new_align = None;
+                                    ui.label(RichText::new("Alignment").size(11.5).color(th.subtle));
+                                    ui.horizontal(|ui| {
+                                        for (al, lbl) in [
+                                            (Align::Left, "Left"),
+                                            (Align::Center, "Center"),
+                                            (Align::Right, "Right"),
+                                            (Align::Justify, "Justify"),
+                                        ] {
+                                            if ui.selectable_label(cur_align == al, lbl).clicked() {
+                                                new_align = Some(al);
+                                            }
+                                        }
+                                    });
+
+                                    // Text Color swatches
+                                    let mut new_color = None;
+                                    ui.label(RichText::new("Text Color").size(11.5).color(th.subtle));
+                                    ui.horizontal(|ui| {
+                                        for sw in [
+                                            [0u8, 0, 0],
+                                            [68, 72, 82],
+                                            [24, 72, 168],
+                                            [185, 28, 28],
+                                            [22, 101, 52],
+                                            [255, 255, 255],
+                                        ] {
+                                            let (sr, sresp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                                            ui.painter().rect_filled(sr, 4.0, Color32::from_rgb(sw[0], sw[1], sw[2]));
+                                            let stroke = if sw == cur_col {
+                                                Stroke::new(2.0, th.accent)
+                                            } else {
+                                                Stroke::new(1.0, th.border)
+                                            };
+                                            ui.painter().rect_stroke(sr, 4.0, stroke, egui::StrokeKind::Inside);
+                                            if sresp.clicked() {
+                                                new_color = Some(sw);
+                                            }
+                                        }
+                                    });
+
+                                    // Position & Width
+                                    ui.label(RichText::new("Position & Size").size(11.5).color(th.subtle));
+                                    let mut nx = cur_x;
+                                    let mut ny = cur_y;
+                                    let mut nw = cur_w;
+                                    let mut pos_or_w_changed = false;
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("X:").weak().small());
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut nx)
+                                                    .speed(0.5)
+                                                    .range(0.0..=(pw - 20.0).max(0.0))
+                                                    .fixed_decimals(0)
+                                                    .suffix(" pt"),
+                                            )
+                                            .changed()
+                                        {
+                                            pos_or_w_changed = true;
+                                        }
+                                        ui.label(RichText::new("Y:").weak().small());
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut ny)
+                                                    .speed(0.5)
+                                                    .range(0.0..=(ph - 14.0).max(0.0))
+                                                    .fixed_decimals(0)
+                                                    .suffix(" pt"),
+                                            )
+                                            .changed()
+                                        {
+                                            pos_or_w_changed = true;
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("Width:").weak().small());
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut nw)
+                                                    .speed(1.0)
+                                                    .range(40.0..=(pw - nx).max(40.0))
+                                                    .fixed_decimals(0)
+                                                    .suffix(" pt"),
+                                            )
+                                            .changed()
+                                        {
+                                            pos_or_w_changed = true;
+                                        }
+                                    });
+                                    ui.label(
+                                        RichText::new("Tip: drag ⋮⋮ Move or the right-edge handle directly on the page.")
+                                            .weak()
+                                            .small(),
+                                    );
+
+                                    let mut delete_blk = false;
+                                    ui.add_space(4.0);
+                                    if ui
+                                        .add_sized(
+                                            vec2(ui.available_width(), 26.0),
+                                            egui::Button::new(RichText::new("Delete Text Block").color(Color32::from_rgb(185, 28, 28))),
+                                        )
+                                        .clicked()
+                                    {
+                                        delete_blk = true;
+                                    }
+
+                                    let sz_changed = (new_sz - cur_sz).abs() > 0.01;
+                                    if sz_changed
+                                        || toggle_bold
+                                        || toggle_italic
+                                        || new_align.is_some()
+                                        || new_color.is_some()
+                                        || pos_or_w_changed
+                                        || delete_blk
+                                    {
+                                        let tab = self.tab();
+                                        if let Some(pv) = tab.pdf_view.as_mut() {
+                                            if !pos_or_w_changed || pv.editing_checkpointed != Some(id) {
+                                                pv.checkpoint();
+                                                if pos_or_w_changed {
+                                                    pv.editing_checkpointed = Some(id);
+                                                }
+                                            }
+                                            if let Some(b) = pv.blocks.iter_mut().find(|b| b.id == id) {
+                                                if delete_blk {
+                                                    b.deleted = true;
+                                                    b.modified = true;
+                                                    pv.selected_block = None;
+                                                } else {
+                                                    if sz_changed {
+                                                        b.size_pt = new_sz;
+                                                    }
+                                                    if toggle_bold {
+                                                        b.bold = !b.bold;
+                                                    }
+                                                    if toggle_italic {
+                                                        b.italic = !b.italic;
+                                                    }
+                                                    if let Some(al) = new_align {
+                                                        b.align = al;
+                                                    }
+                                                    if let Some(c) = new_color {
+                                                        b.color = c;
+                                                    }
+                                                    if pos_or_w_changed {
+                                                        b.x_pt = nx;
+                                                        b.y_pt = ny;
+                                                        b.w_pt = nw;
+                                                    }
+                                                    b.modified = true;
+                                                }
+                                            }
+                                        }
+                                        tab.rev += 1;
+                                        tab.dirty = true;
+                                    }
+                                } else {
+                                    ui.label(
+                                        RichText::new("Click any text on the PDF page to edit, move, resize, or align it — or click + Add Text Box above.")
+                                            .weak()
+                                            .small(),
+                                    );
+                                }
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.label(RichText::new("Document").size(11.5).color(th.subtle).strong());
+                                if ui
+                                    .add_sized(
+                                        vec2(ui.available_width(), 26.0),
+                                        egui::Button::new("Convert to Reflowable Doc"),
+                                    )
+                                    .on_hover_text("Switch to full word-processor reflow editing")
+                                    .clicked()
+                                {
+                                    self.act(Action::SetPdfMode(crate::editor::PdfMode::Reflow));
+                                }
+                            });
+                    });
+            }
+
+            // Small docked tab on the right edge to hide/show the PDF Editor panel
+            egui::Panel::right("pdf-studio-tab")
+                .resizable(false)
+                .default_size(18.0)
+                .min_size(18.0)
+                .max_size(18.0)
+                .frame(Frame::new().fill(th.workspace).inner_margin(Margin::ZERO))
+                .show(ui, |ui| {
+                    let avail = ui.available_rect_before_wrap();
+                    let tab_h = 68.0_f32.min(avail.height().max(24.0));
+                    let tab_rect = egui::Rect::from_min_size(
+                        pos2(avail.min.x, avail.center().y - tab_h * 0.5),
+                        vec2(18.0, tab_h),
+                    );
+                    let resp = ui.interact(tab_rect, ui.scope_id().with("pdf-studio-tab-btn"), Sense::click());
+                    let bg = if resp.hovered() { th.hover } else { th.chrome };
+                    let cr = egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 };
+                    ui.painter().rect_filled(tab_rect, cr, bg);
+                    ui.painter().rect_stroke(tab_rect, cr, Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
+                    let glyph = if self.pdf_panel_collapsed { "‹" } else { "›" };
+                    let glyph_col = if resp.hovered() || self.pdf_panel_collapsed { th.accent } else { th.text };
+                    ui.painter().text(
+                        tab_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        egui::FontId::proportional(15.0),
+                        glyph_col,
+                    );
+                    let tip = if self.pdf_panel_collapsed { "Show PDF Editor panel" } else { "Hide PDF Editor panel" };
+                    if resp.on_hover_text(tip).clicked() {
+                        self.pdf_panel_collapsed = !self.pdf_panel_collapsed;
+                    }
+                });
+        }
+
         let mut cmds = Vec::new();
         let mut caret_screen_rect = None;
         egui::CentralPanel::default().frame(Frame::new().fill(th.workspace)).show(ui, |ui| {
@@ -2713,7 +3179,13 @@ impl eframe::App for App {
                 table: &table,
             };
             let focused = ui.memory(|m| m.focused());
-            let doc_has_keys = (focused.is_none() || focused == Some(doc_id)) && self.confirm_close.is_none() && !self.confirm_quit && !self.editing_title;
+            let doc_has_keys = (focused.is_none() || focused == Some(doc_id)) && !self.close_flow.is_confirming() && !self.editing_title;
+            if doc_has_keys && focused.is_none() && matches!(self.dialog, Dialog::None) {
+                ui.memory_mut(|m| {
+                    m.request_focus(doc_id);
+                    m.set_focus_lock_filter(doc_id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false });
+                });
+            }
             let view_h = ui.available_height();
             let tab_id = self.tabs[active].id;
             let mut clip = if self.paste_plain_next { None } else { self.clip.take() };
@@ -2734,7 +3206,37 @@ impl eframe::App for App {
                     shortcuts: self.cfg.shortcut_preset,
                 };
                 let tab = &mut self.tabs[active];
-                if doc_has_keys {
+                let exact_pdf = tab.pdf_view.as_ref().is_some_and(|pv| pv.is_exact());
+                if exact_pdf {
+                    let (save_k, save_as_k, undo_k, redo_k, zoom_in_k, zoom_out_k, zoom_0_k) = ui.input(|i| {
+                        let cmd = i.modifiers.command;
+                        let sh = i.modifiers.shift;
+                        (
+                            cmd && !sh && i.key_pressed(egui::Key::S),
+                            cmd && sh && i.key_pressed(egui::Key::S),
+                            doc_has_keys && cmd && !sh && i.key_pressed(egui::Key::Z),
+                            doc_has_keys && cmd && (i.key_pressed(egui::Key::Y) || (sh && i.key_pressed(egui::Key::Z))),
+                            cmd && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)),
+                            cmd && i.key_pressed(egui::Key::Minus),
+                            cmd && i.key_pressed(egui::Key::Num0),
+                        )
+                    });
+                    if save_k {
+                        cmds.push(Cmd::Save);
+                    } else if save_as_k {
+                        cmds.push(Cmd::SaveAs);
+                    } else if undo_k {
+                        tab.pdf_undo();
+                    } else if redo_k {
+                        tab.pdf_redo();
+                    } else if zoom_in_k {
+                        cmds.push(Cmd::ZoomIn);
+                    } else if zoom_out_k {
+                        cmds.push(Cmd::ZoomOut);
+                    } else if zoom_0_k {
+                        cmds.push(Cmd::Zoom100);
+                    }
+                } else if doc_has_keys {
                     let lay = tab.layout(&ctx, &opts);
                     tab.handle_keys_mode(ui, &lay, &sc, &mut clip, &mut cmds, view_h, self.mode, self.cfg.shortcut_preset);
                 }
@@ -3028,5 +3530,318 @@ impl eframe::App for App {
                 remove_recovery(t.id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolbar_does_not_collapse_canvas_when_unmaximizing_window() {
+        let ctx = egui::Context::default();
+        let th = Theme::light();
+        let book = crate::fonts::FontBook::default();
+        let mut app = App {
+            egui_ctx: ctx.clone(),
+            tabs: vec![Tab::new(1, "Untitled1".into(), Document::default())],
+            active: 0,
+            next_id: 2,
+            untitled: 1,
+            book,
+            zoom: ZOOM_START,
+            zoom_mode: ZoomMode::Percent,
+            draft: false,
+            show_toolbar: true,
+            show_status: true,
+            show_ruler: true,
+            show_marks: false,
+            show_hf: true,
+            clean_screen: false,
+            compact_mode: false,
+            sc_table: Vec::new(),
+            cfg: Config::default(),
+            theme: th.clone(),
+            dialog: Dialog::None,
+            find: FindState::default(),
+            clip: None,
+            paste_plain_next: false,
+            actions: Vec::new(),
+            screenshot: None,
+            shot_done: Arc::new(AtomicBool::new(false)),
+            frame: 0,
+            toast: None,
+            last_autosave: 0.0,
+            title: String::new(),
+            close_flow: CloseFlow::None,
+            doc_id: egui::Id::unique("test-canvas"),
+            view_size: vec2(1200.0, 800.0),
+            fonts_rev: 1,
+            speller: crate::spell::Speller::new(),
+            show_nav: false,
+            right_panel: RightPanel::None,
+            history_sel_idx: 0,
+            history_ver_name: String::new(),
+            mode: DocMode::Editing,
+            font_search: String::new(),
+            demo_done: false,
+            painter_style: None,
+            editing_title: false,
+            comment_reply_draft: (0, String::new()),
+            wc_metric: 0,
+            table_panel_collapsed: false,
+            pdf_panel_collapsed: false,
+            update: UpdateState::default(),
+        };
+
+        // Simulate fullscreen -> windowed -> narrow window resize sequence
+        for (w, h) in [(1920.0, 1080.0), (1100.0, 720.0), (780.0, 560.0)] {
+            let mut toolbar_h = 0.0f32;
+            let mut central_h = 0.0f32;
+            for _ in 0..2 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h))),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(raw, |ui| {
+                    egui::Panel::top("menubar").show(ui, |ui| {
+                        app.docs_header(ui, &th);
+                    });
+                    let tb = egui::Panel::top("toolbar")
+                        .max_size(140.0)
+                        .show(ui, |ui| {
+                            Frame::new()
+                                .inner_margin(Margin::symmetric(10, 5))
+                                .show(ui, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = vec2(2.5, 4.0);
+                                        app.toolbar(ui, &th);
+                                    });
+                                });
+                        });
+                    toolbar_h = tb.response.rect.height();
+                    egui::Panel::bottom("status").show(ui, |ui| {
+                        app.status_bar(ui, &th);
+                    });
+                    let cp = egui::CentralPanel::default().show(ui, |ui| {
+                        central_h = ui.available_height();
+                    });
+                    let _ = cp;
+                });
+                out.textures_delta.clear();
+            }
+            assert!(
+                toolbar_h <= 145.0,
+                "Toolbar blew up vertically at {w}x{h}: height={toolbar_h}"
+            );
+            assert!(
+                central_h >= h * 0.5,
+                "Central document canvas collapsed at {w}x{h}: central_h={central_h}, toolbar_h={toolbar_h}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_state_machines_enforce_exclusivity_and_invariants() {
+        // 1. CloseFlow: single exclusive lifecycle instead of 3 booleans/Options
+        assert!(!CloseFlow::None.is_confirming());
+        assert!(CloseFlow::ConfirmTab(0).is_confirming());
+        assert!(CloseFlow::ConfirmQuit.is_confirming());
+        assert!(!CloseFlow::ForceQuit.is_confirming());
+
+        // 2. RightPanel: Comments and VersionHistory are mutually exclusive
+        let mut panel = RightPanel::None;
+        panel.toggle(RightPanel::Comments);
+        assert_eq!(panel, RightPanel::Comments);
+        panel.toggle(RightPanel::VersionHistory);
+        assert_eq!(panel, RightPanel::VersionHistory);
+        panel.toggle(RightPanel::VersionHistory);
+        assert_eq!(panel, RightPanel::None);
+
+        // 3. BlockKind: derived classification without breaking ParaFmt JSON serialization
+        let text_fmt = crate::doc::ParaFmt::default();
+        assert_eq!(text_fmt.block_kind(), crate::doc::BlockKind::Text);
+
+        let hr_fmt = crate::doc::ParaFmt {
+            hr: true,
+            ..Default::default()
+        };
+        assert_eq!(hr_fmt.block_kind(), crate::doc::BlockKind::HorizontalRule);
+
+        let img_fmt = crate::doc::ParaFmt {
+            image_id: 42,
+            ..Default::default()
+        };
+        assert_eq!(img_fmt.block_kind(), crate::doc::BlockKind::Image(42));
+
+        let cell_fmt = crate::doc::ParaFmt {
+            table_id: 7,
+            table_row: 2,
+            table_col: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            cell_fmt.block_kind(),
+            crate::doc::BlockKind::TableCell {
+                table_id: 7,
+                row: 2,
+                col: 3,
+            }
+        );
+
+        // 4. CanvasDrag: exclusive pointer drag state
+        let idle = crate::editor::CanvasDrag::default();
+        assert!(idle.is_idle());
+        assert!(!idle.is_resizing_image());
+        assert_eq!(idle.resizing_image_id(), None);
+
+        let img_drag = crate::editor::CanvasDrag::ResizingImage {
+            id: 9,
+            handle: 2,
+            start_pos: egui::pos2(10.0, 20.0),
+            w0_in: 3.0,
+            h0_in: 2.0,
+        };
+        assert!(!img_drag.is_idle());
+        assert!(img_drag.is_resizing_image());
+        assert_eq!(img_drag.resizing_image_id(), Some(9));
+        assert_eq!(img_drag.resizing_image_handle(), Some((9, 2)));
+    }
+
+    #[test]
+    fn table_math_target_reassignment_prevents_self_reference_and_updates_direction() {
+        let mut r = 2usize;
+        let mut c = 1usize;
+        let mut use_above = false;
+        let mut use_left = false;
+        let mut chosen = vec![(0, 1), (1, 1), (2, 2)];
+        let mut picking = true;
+
+        // Reassign target to (1, 1) which was in `chosen` -> stripped automatically
+        crate::dialogs::set_table_math_target(
+            1,
+            1,
+            &mut r,
+            &mut c,
+            &mut use_above,
+            &mut use_left,
+            &mut chosen,
+            &mut picking,
+        );
+        assert_eq!((r, c), (1, 1));
+        assert!(!chosen.contains(&(1, 1)));
+        assert_eq!(chosen, vec![(0, 1), (2, 2)]);
+        assert!(!picking);
+
+        // Moving to top row (0, 2) while `use_above` is active flips to `use_left`
+        use_above = true;
+        crate::dialogs::set_table_math_target(
+            0,
+            2,
+            &mut r,
+            &mut c,
+            &mut use_above,
+            &mut use_left,
+            &mut chosen,
+            &mut picking,
+        );
+        assert_eq!((r, c), (0, 2));
+        assert!(!use_above);
+        assert!(use_left);
+    }
+
+    #[test]
+    fn pdf_mode_state_machine_and_undo_redo() {
+        let ctx = egui::Context::default();
+        let mut book = FontBook::default();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            book = crate::fonts::install(&ctx);
+        });
+        out.textures_delta.clear();
+
+        let mut doc = Document::default();
+        doc.insert_text(Pos::new(0, 0), "Hello PDF", CharStyle::default());
+        let mut bytes = Vec::new();
+        let mut out = ctx.run_ui(Default::default(), |_ui| {
+            bytes = crate::pdf::export(&ctx, &doc, &book);
+        });
+        out.textures_delta.clear();
+
+        let mut tab = Tab::new(1, "sample.pdf".into(), doc);
+        tab.attach_pdf_exact_view(bytes);
+        assert_eq!(tab.pdf_mode(), Some(crate::editor::PdfMode::Read));
+
+        tab.set_pdf_mode(crate::editor::PdfMode::Edit);
+        assert_eq!(tab.pdf_mode(), Some(crate::editor::PdfMode::Edit));
+
+        {
+            let pv = tab.pdf_view.as_mut().expect("pdf_view attached");
+            assert!(!pv.blocks.is_empty());
+            pv.checkpoint();
+            pv.blocks[0].text = "Updated PDF".into();
+            pv.blocks[0].modified = true;
+            assert!(pv.has_edits());
+        }
+        tab.dirty = true;
+
+        assert!(tab.pdf_undo());
+        assert_eq!(tab.pdf_view.as_ref().unwrap().blocks[0].text, "Hello PDF");
+        assert!(!tab.dirty);
+
+        assert!(tab.pdf_redo());
+        assert_eq!(tab.pdf_view.as_ref().unwrap().blocks[0].text, "Updated PDF");
+        assert!(tab.dirty);
+
+        tab.set_pdf_mode(crate::editor::PdfMode::Reflow);
+        assert_eq!(tab.pdf_mode(), Some(crate::editor::PdfMode::Reflow));
+        tab.set_pdf_mode(crate::editor::PdfMode::Read);
+        assert_eq!(tab.pdf_mode(), Some(crate::editor::PdfMode::Read));
+
+        // Regression test: rendering modified/justified PDF text blocks after deselecting
+        // (clicking/double-clicking outside the text box) must not panic from re-entrant fonts lock.
+        tab.set_pdf_mode(crate::editor::PdfMode::Edit);
+        {
+            let pv = tab.pdf_view.as_mut().unwrap();
+            pv.blocks[0].text = "First justified line with enough words to wrap across multiple lines cleanly.".into();
+            pv.blocks[0].align = Align::Justify;
+            pv.blocks[0].w_pt = 160.0;
+            pv.blocks[0].modified = true;
+            pv.selected_block = Some(pv.blocks[0].id);
+        }
+        let th = Theme::light();
+        let opts = crate::editor::ViewOpts {
+            zoom: 1.0,
+            draft: false,
+            show_marks: false,
+            margin_guides: false,
+            block_cursor: false,
+            header_footer: false,
+            matches: &[],
+            theme: &th,
+            book: &book,
+            fonts_rev: 1,
+            speller: None,
+            mode: DocMode::Editing,
+            shortcuts: ShortcutPreset::default(),
+        };
+        let doc_id = egui::Id::unique("pdf-deselect-test");
+        let mut cmds = Vec::new();
+        // Frame 1: selected
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            tab.show(ui, &opts, doc_id, &mut cmds);
+        });
+        out.textures_delta.clear();
+        // Frame 2: deselected (as after clicking/double-clicking outside the text box) -> paints justified galleys
+        tab.pdf_view.as_mut().unwrap().selected_block = None;
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            tab.show(ui, &opts, doc_id, &mut cmds);
+        });
+        out.textures_delta.clear();
+        // Frame 3: Read mode with justified modified text
+        tab.set_pdf_mode(crate::editor::PdfMode::Read);
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            tab.show(ui, &opts, doc_id, &mut cmds);
+        });
+        out.textures_delta.clear();
     }
 }

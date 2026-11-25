@@ -192,40 +192,76 @@ impl App {
                 }
 
                 // Mode selector pill (Editing / Suggesting / Viewing)
-                let mode_r = combo_box_button(ui, th, 108.0, self.mode.label(), FontId::proportional(12.5), "Document mode (Editing / Suggesting / Viewing)");
-                egui::Popup::menu(&mode_r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                    fit_menu(
-                        ui,
-                        &[
-                            ("Editing — Edit document directly", "✓"),
-                            ("Suggesting — Edits become suggestions", "✓"),
-                            ("Viewing — Read or print final document", "✓"),
-                        ],
-                    );
-                    for (m, desc) in [
-                        (DocMode::Editing, "Edit document directly"),
-                        (DocMode::Suggesting, "Edits become suggestions"),
-                        (DocMode::Viewing, "Read or print final document"),
-                    ] {
-                        if mitem(ui, th, m.icon(), &format!("{} — {}", m.label(), desc), if self.mode == m { "✓" } else { "" }) {
-                            self.act(Action::SetMode(m));
+                if let Some(pdf_mode @ (crate::editor::PdfMode::Read | crate::editor::PdfMode::Edit)) = self.tab_ref().pdf_mode() {
+                    let (seg_rect, _) = ui.allocate_exact_size(vec2(114.0, 26.0), Sense::hover());
+                    ui.painter().rect_filled(seg_rect, 13.0, th.surface_subtle);
+                    ui.painter().rect_stroke(seg_rect, 13.0, Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
+                    let half = seg_rect.width() * 0.5;
+                    for (idx, (lbl, target_m, tip)) in [
+                        ("Read", crate::editor::PdfMode::Read, "Read mode — clean pixel-accurate PDF view"),
+                        ("Edit", crate::editor::PdfMode::Edit, "Edit mode — click any text on the PDF to edit in place"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let r = egui::Rect::from_min_size(
+                            pos2(seg_rect.min.x + idx as f32 * half, seg_rect.min.y),
+                            vec2(half, seg_rect.height()),
+                        );
+                        let resp = ui.interact(r, ui.scope_id().with(("pdf_mode_seg", idx)), Sense::click()).on_hover_text(tip);
+                        let active = pdf_mode == target_m;
+                        if active {
+                            ui.painter().rect_filled(r.shrink(2.0), 11.0, th.accent);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(r.shrink(2.0), 11.0, th.hover);
+                        }
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            lbl,
+                            FontId::proportional(12.0),
+                            if active { Color32::WHITE } else { th.text },
+                        );
+                        if resp.clicked() && !active {
+                            self.act(Action::SetPdfMode(target_m));
                         }
                     }
-                });
+                } else {
+                    let mode_r = combo_box_button(ui, th, 108.0, self.mode.label(), FontId::proportional(12.5), "Document mode (Editing / Suggesting / Viewing)");
+                    egui::Popup::menu(&mode_r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                        fit_menu(
+                            ui,
+                            &[
+                                ("Editing — Edit document directly", "✓"),
+                                ("Suggesting — Edits become suggestions", "✓"),
+                                ("Viewing — Read or print final document", "✓"),
+                            ],
+                        );
+                        for (m, desc) in [
+                            (DocMode::Editing, "Edit document directly"),
+                            (DocMode::Suggesting, "Edits become suggestions"),
+                            (DocMode::Viewing, "Read or print final document"),
+                        ] {
+                            if mitem(ui, th, m.icon(), &format!("{} — {}", m.label(), desc), if self.mode == m { "✓" } else { "" }) {
+                                self.act(Action::SetMode(m));
+                            }
+                        }
+                    });
+                }
 
                 let cm_tip = if open_comments > 0 {
                     format!("Comments & suggestions ({open_comments} open)")
                 } else {
                     "Open comment history (Ctrl+Alt+M)".into()
                 };
-                if icon_button(ui, th, Icon::Comment, &cm_tip, self.show_comments, true).clicked() {
+                if icon_button(ui, th, Icon::Comment, &cm_tip, self.right_panel == crate::app::RightPanel::Comments, true).clicked() {
                     self.act(Action::ToggleComments);
                 }
                 if open_comments > 0 {
                     ui.label(RichText::new(format!("{open_comments}")).size(11.5).color(th.accent).strong());
                 }
 
-                if icon_button(ui, th, Icon::History, "Version history (Ctrl+Alt+Shift+H)", self.show_history, true).clicked() {
+                if icon_button(ui, th, Icon::History, "Version history (Ctrl+Alt+Shift+H)", self.right_panel == crate::app::RightPanel::VersionHistory, true).clicked() {
                     self.act(Action::ToggleHistory);
                 }
 
@@ -642,7 +678,7 @@ impl App {
             if mcheck(ui, th, self.show_nav, "Show outline", "Ctrl+Alt+A") {
                 self.act(Action::ToggleNav);
             }
-            if mcheck(ui, th, self.show_comments, "Show comments", "") {
+            if mcheck(ui, th, self.right_panel == crate::app::RightPanel::Comments, "Show comments", "") {
                 self.act(Action::ToggleComments);
             }
             if mcheck(ui, th, self.show_marks, "Show non-printing characters (¶)", "") {
@@ -1538,31 +1574,33 @@ impl App {
                 .stroke(Stroke::new(1.0, th.border))
                 .corner_radius(8)
                 .inner_margin(Margin::symmetric(2, 1))
-                .show(ui, |inner_ui| {
-                    inner_ui.spacing_mut().item_spacing.x = 1.0;
-                    if icon_button(inner_ui, th, Icon::Minus, &format!("Decrease font size ({})", kp.shrink_font()), false, st.size > MIN_SIZE).clicked() {
-                        self.act(Action::StepFontSize(-1.0));
-                    }
-                    let size_txt = if st.size.fract() == 0.0 { format!("{}", st.size as i32) } else { format!("{:.1}", st.size) };
-                    let size_r = combo_box_button(inner_ui, th, 44.0, &size_txt, FontId::proportional(13.0), "Font size");
-                    egui::Popup::menu(&size_r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        let widest = SIZE_LIST
-                            .iter()
-                            .map(|s| ui.fonts_mut(|f| f.layout_no_wrap(format!("{}", *s as i32), FontId::proportional(13.0), Color32::WHITE).size().x) + 16.0)
-                            .fold(0.0f32, f32::max);
-                        ui.set_width((widest + 10.0).ceil());
-                        egui::ScrollArea::vertical().max_height(320.0).id_salt("size-list").show(ui, |ui| {
-                            for s in SIZE_LIST {
-                                if ui.selectable_label((st.size - s).abs() < 0.01, format!("{}", *s as i32)).clicked() {
-                                    self.act(Action::Size(*s));
-                                    ui.close();
+                .show(ui, |frame_ui| {
+                    frame_ui.horizontal(|inner_ui| {
+                        inner_ui.spacing_mut().item_spacing.x = 1.0;
+                        if icon_button(inner_ui, th, Icon::Minus, &format!("Decrease font size ({})", kp.shrink_font()), false, st.size > MIN_SIZE).clicked() {
+                            self.act(Action::StepFontSize(-1.0));
+                        }
+                        let size_txt = if st.size.fract() == 0.0 { format!("{}", st.size as i32) } else { format!("{:.1}", st.size) };
+                        let size_r = combo_box_button(inner_ui, th, 44.0, &size_txt, FontId::proportional(13.0), "Font size");
+                        egui::Popup::menu(&size_r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                            let widest = SIZE_LIST
+                                .iter()
+                                .map(|s| ui.fonts_mut(|f| f.layout_no_wrap(format!("{}", *s as i32), FontId::proportional(13.0), Color32::WHITE).size().x) + 16.0)
+                                .fold(0.0f32, f32::max);
+                            ui.set_width((widest + 10.0).ceil());
+                            egui::ScrollArea::vertical().max_height(320.0).id_salt("size-list").show(ui, |ui| {
+                                for s in SIZE_LIST {
+                                    if ui.selectable_label((st.size - s).abs() < 0.01, format!("{}", *s as i32)).clicked() {
+                                        self.act(Action::Size(*s));
+                                        ui.close();
+                                    }
                                 }
-                            }
+                            });
                         });
+                        if icon_button(inner_ui, th, Icon::Plus, &format!("Increase font size ({})", kp.grow_font()), false, st.size < MAX_SIZE).clicked() {
+                            self.act(Action::StepFontSize(1.0));
+                        }
                     });
-                    if icon_button(inner_ui, th, Icon::Plus, &format!("Increase font size ({})", kp.grow_font()), false, st.size < MAX_SIZE).clicked() {
-                        self.act(Action::StepFontSize(1.0));
-                    }
                 });
             sep(ui, th);
 

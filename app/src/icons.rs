@@ -759,27 +759,63 @@ pub fn draw(p: &Painter, r: Rect, icon: Icon, fg: Color32, accent: Color32) {
             }
         }
         Icon::Moon => {
-            // Precision mathematical crescent moon with soft duotone fill
-            let c_outer = pt(0.50, 0.50);
-            let r_outer = s * 0.37;
-            let c_inner = pt(0.65, 0.36);
-            let r_inner = s * 0.31;
-            let mut crescent = Vec::with_capacity(34);
-            for i in 0..=18 {
-                let a = 0.65 + (i as f32 / 18.0) * 4.45;
-                crescent.push(c_outer + vec2(a.cos(), a.sin()) * r_outer);
+            // Exact circle-circle intersection crescent with concave-safe triangle-strip fill
+            let c_out = pt(0.50, 0.50);
+            let r_out = s * 0.36;
+            let c_in = pt(0.65, 0.36);
+            let r_in = s * 0.30;
+            let dv = c_in - c_out;
+            let d = dv.length().max(0.001);
+            let a_dist = (r_out * r_out - r_in * r_in + d * d) / (2.0 * d);
+            let h_dist = (r_out * r_out - a_dist * a_dist).max(0.0).sqrt();
+            let dir = dv / d;
+            let perp = vec2(-dir.y, dir.x);
+            let mid = c_out + dir * a_dist;
+            // Two exact horn tips where the outer and inner circles meet
+            let tip_a = mid + perp * h_dist; // bottom-right horn
+            let tip_b = mid - perp * h_dist; // top-right horn
+
+            let ang = |center: Pos2, q: Pos2| (q.y - center.y).atan2(q.x - center.x);
+            let oa0 = ang(c_out, tip_a);
+            let mut oa1 = ang(c_out, tip_b);
+            while oa1 <= oa0 {
+                oa1 += std::f32::consts::TAU;
             }
-            for i in 0..=14 {
-                let a = 4.65 - (i as f32 / 14.0) * 3.55;
-                crescent.push(c_inner + vec2(a.cos(), a.sin()) * r_inner);
+            let ia0 = ang(c_in, tip_a);
+            let mut ia1 = ang(c_in, tip_b);
+            while ia1 <= ia0 {
+                ia1 += std::f32::consts::TAU;
             }
-            p.add(Shape::Path(egui::epaint::PathShape {
-                points: crescent.clone(),
-                closed: true,
-                fill: tint_strong,
-                stroke: Stroke::NONE.into(),
-            }));
-            p.add(Shape::closed_line(crescent, ac_bold));
+
+            const N: usize = 20;
+            let mut outer_pts = Vec::with_capacity(N + 1);
+            let mut inner_pts = Vec::with_capacity(N + 1);
+            for i in 0..=N {
+                let t = i as f32 / N as f32;
+                let oa = oa0 + t * (oa1 - oa0);
+                let ia = ia0 + t * (ia1 - ia0);
+                outer_pts.push(c_out + vec2(oa.cos(), oa.sin()) * r_out);
+                inner_pts.push(c_in + vec2(ia.cos(), ia.sin()) * r_in);
+            }
+
+            // Concave-safe triangle-strip mesh strictly between outer and inner arcs
+            let mut mesh = egui::Mesh::default();
+            let uv = egui::epaint::WHITE_UV;
+            for i in 0..=N {
+                mesh.vertices.push(egui::epaint::Vertex { pos: outer_pts[i], uv, color: tint_strong });
+                mesh.vertices.push(egui::epaint::Vertex { pos: inner_pts[i], uv, color: tint_strong });
+            }
+            for i in 0..N {
+                let b = (i * 2) as u32;
+                mesh.indices.extend_from_slice(&[b, b + 2, b + 1, b + 1, b + 2, b + 3]);
+            }
+            p.add(Shape::mesh(mesh));
+
+            // Crisp closed crescent outline
+            let mut outline = Vec::with_capacity(N * 2 + 2);
+            outline.extend_from_slice(&outer_pts);
+            outline.extend(inner_pts.iter().rev().skip(1).copied());
+            p.add(Shape::closed_line(outline, ac_bold));
         }
         Icon::Close => {
             line(p, (0.24, 0.24), (0.76, 0.76), st);

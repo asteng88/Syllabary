@@ -1231,6 +1231,35 @@ pub struct ParaFmt {
     pub widow_control: bool,
 }
 
+/// Explicit mutually-exclusive block kind derived from `ParaFmt`, allowing exhaustive
+/// pattern matching while preserving 100% `.wpx` JSON backwards compatibility.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockKind {
+    Text,
+    HorizontalRule,
+    Image(u64),
+    TableCell { table_id: u32, row: u16, col: u16 },
+}
+
+impl ParaFmt {
+    /// Returns the mutually-exclusive structural block kind for this paragraph.
+    pub fn block_kind(&self) -> BlockKind {
+        if self.table_id > 0 {
+            BlockKind::TableCell {
+                table_id: self.table_id,
+                row: self.table_row,
+                col: self.table_col,
+            }
+        } else if self.image_id > 0 {
+            BlockKind::Image(self.image_id)
+        } else if self.hr {
+            BlockKind::HorizontalRule
+        } else {
+            BlockKind::Text
+        }
+    }
+}
+
 impl Default for ParaFmt {
     fn default() -> Self {
         Self {
@@ -2709,6 +2738,15 @@ impl Document {
         Pos::new(pos.p + 1, 0)
     }
 
+    /// First paragraph index belonging to `(table_id, row, col)`.
+    pub fn table_cell_para(&self, table_id: u32, row: usize, col: usize) -> Option<usize> {
+        self.paras.iter().position(|p| {
+            p.fmt.table_id == table_id
+                && p.fmt.table_row as usize == row
+                && p.fmt.table_col as usize == col
+        })
+    }
+
     pub fn delete_range(&mut self, a: Pos, b: Pos) -> Pos {
         let (a, b) = order(self.clamp(a), self.clamp(b));
         if a == b {
@@ -2723,6 +2761,28 @@ impl Document {
             para.text.drain(a.c..b.c);
             para.styles.drain(a.c..b.c);
         } else {
+            let fa = self.paras[a.p].fmt;
+            let fb = self.paras[b.p].fmt;
+            let same_cell = fa.table_id == fb.table_id
+                && fa.table_row == fb.table_row
+                && fa.table_col == fb.table_col;
+            if (fa.table_id > 0 || fb.table_id > 0) && !same_cell {
+                // Never drain/merge paragraphs across table cell boundaries; clear text within each touched cell instead.
+                for pi in a.p..=b.p {
+                    let para = &mut self.paras[pi];
+                    let from = if pi == a.p { a.c.min(para.len()) } else { 0 };
+                    let to = if pi == b.p { b.c.min(para.len()) } else { para.len() };
+                    if from < to {
+                        if from == 0 && to == para.len() {
+                            para.end_style = para.style_at(0);
+                            para.end_style.link = 0;
+                        }
+                        para.text.drain(from..to);
+                        para.styles.drain(from..to);
+                    }
+                }
+                return a;
+            }
             let tail = self.paras[b.p].clone();
             let first = &mut self.paras[a.p];
             if a.c == 0 && first.len() > 0 {
