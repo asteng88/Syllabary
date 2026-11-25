@@ -151,6 +151,7 @@ pub enum Action {
     TableCellFormula(Option<String>),
     OpenTableMath,
     SetPdfMode(crate::editor::PdfMode),
+    OpenHeadersFooters,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -245,13 +246,15 @@ impl CloseFlow {
     }
 }
 
-/// Explicit mutually-exclusive right-hand studio inspector drawer (replaces `show_comments` + `show_history`).
+/// Explicit mutually-exclusive right-hand studio inspector drawer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RightPanel {
     #[default]
     None,
     Comments,
     VersionHistory,
+    HeadersFooters,
+    PageSetup,
 }
 
 impl RightPanel {
@@ -288,7 +291,7 @@ pub struct App {
     screenshot: Option<PathBuf>,
     shot_done: Arc<AtomicBool>,
     frame: u64,
-    toast: Option<(String, f64)>,
+    pub toasts: modernrust::ToastStack,
     last_autosave: f64,
     title: String,
     pub close_flow: CloseFlow,
@@ -350,7 +353,7 @@ impl App {
             screenshot,
             shot_done: Arc::new(AtomicBool::new(false)),
             frame: 0,
-            toast: None,
+            toasts: modernrust::ToastStack::default(),
             last_autosave: 0.0,
             title: String::new(),
             close_flow: CloseFlow::None,
@@ -788,8 +791,39 @@ impl App {
         }
     }
 
+    /// Returns the active ModernRust Fluent palette matching Syllabary's Light / Dark mode.
+    pub fn mr_palette(&self) -> modernrust::ThemePalette {
+        if self.cfg.dark {
+            modernrust::ThemePreset::ObsidianPaper.palette()
+        } else {
+            modernrust::ThemePreset::FluentLight.palette()
+        }
+    }
+
     pub fn toast(&mut self, msg: String) {
-        self.toast = Some((msg, -1.0));
+        let lower = msg.to_ascii_lowercase();
+        let (title, role) = if lower.starts_with("saved")
+            || lower.starts_with("exported")
+            || lower.starts_with("restored")
+            || lower.starts_with("inserted")
+            || lower.starts_with("created")
+        {
+            ("Success", modernrust::Role::Success)
+        } else if lower.contains("couldn't")
+            || lower.contains("failed")
+            || lower.contains("error")
+        {
+            ("Error", modernrust::Role::Danger)
+        } else if lower.contains("place the cursor")
+            || lower.contains("already")
+            || lower.contains("unsaved")
+        {
+            ("Notice", modernrust::Role::Warning)
+        } else {
+            ("Syllabary", modernrust::Role::Info)
+        };
+        let now = self.egui_ctx.input(|i| i.time);
+        self.toasts.push(title, msg, role, now);
     }
 
     pub fn start_update_check(&mut self, manual: bool) {
@@ -1277,6 +1311,10 @@ impl App {
                 Action::DuplicatePara => self.tab().duplicate_para(now),
                 Action::SelectAll => self.tab().select_all(),
                 Action::Dialog(d) => {
+                    if matches!(d, Dialog::PageSetup) {
+                        self.right_panel = RightPanel::PageSetup;
+                        continue;
+                    }
                     if let Dialog::Find(replace) = &d {
                         let sel = self.tab_ref().selected_text();
                         if !sel.is_empty() && !sel.contains('\n') && sel.chars().count() < 80 {
@@ -1860,6 +1898,11 @@ impl App {
                         crate::editor::PdfMode::Reflow => "Switched to Reflowable document mode".into(),
                     });
                 }
+                Action::OpenHeadersFooters => {
+                    self.show_hf = true;
+                    self.right_panel = RightPanel::HeadersFooters;
+                    refocus = false;
+                }
                 Action::OpenTableMath => {
                     let fmt = {
                         let t = self.tab_ref();
@@ -2003,7 +2046,7 @@ impl App {
                 Cmd::OpenComments => Action::ToggleComments,
                 Cmd::InsertImage => Action::InsertImage,
                 Cmd::ImageProps(id) => Action::Dialog(Dialog::ImageProps(id)),
-                Cmd::PageSetup => Action::Dialog(Dialog::PageSetup),
+                Cmd::PageSetup => Action::OpenHeadersFooters,
             };
             self.actions.push(a);
         }
@@ -2443,7 +2486,7 @@ impl eframe::App for App {
                     Frame::new()
                         .fill(th.chrome)
                         .stroke(Stroke::new(1.0, th.border.gamma_multiply(0.65)))
-                        .inner_margin(Margin { left: 14, right: 14, top: 2, bottom: 8 }),
+                        .inner_margin(Margin::symmetric(14, 6)),
                 )
                 .show(ui, |ui| {
                     Frame::new()
@@ -2506,6 +2549,28 @@ impl eframe::App for App {
                         .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(10, 8)).stroke(Stroke::new(1.0, th.border)))
                         .show(ui, |ui| {
                             self.history_pane(ui, &th, now);
+                        });
+                }
+                RightPanel::HeadersFooters => {
+                    egui::Panel::right("headers-footers-panel")
+                        .resizable(true)
+                        .default_size(310.0)
+                        .min_size(260.0)
+                        .max_size(440.0)
+                        .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(12, 10)).stroke(Stroke::new(1.0, th.border)))
+                        .show(ui, |ui| {
+                            self.headers_footers_pane(ui, &th, now);
+                        });
+                }
+                RightPanel::PageSetup => {
+                    egui::Panel::right("page-setup-panel")
+                        .resizable(true)
+                        .default_size(300.0)
+                        .min_size(250.0)
+                        .max_size(420.0)
+                        .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(12, 10)).stroke(Stroke::new(1.0, th.border)))
+                        .show(ui, |ui| {
+                            self.page_setup_pane(ui, &th, now);
                         });
                 }
                 RightPanel::None => {}
@@ -3116,6 +3181,7 @@ impl eframe::App for App {
             }
 
             // Small docked tab on the right edge to hide/show the PDF Editor panel
+            let mr = self.mr_palette();
             egui::Panel::right("pdf-studio-tab")
                 .resizable(false)
                 .default_size(18.0)
@@ -3123,30 +3189,7 @@ impl eframe::App for App {
                 .max_size(18.0)
                 .frame(Frame::new().fill(th.workspace).inner_margin(Margin::ZERO))
                 .show(ui, |ui| {
-                    let avail = ui.available_rect_before_wrap();
-                    let tab_h = 68.0_f32.min(avail.height().max(24.0));
-                    let tab_rect = egui::Rect::from_min_size(
-                        pos2(avail.min.x, avail.center().y - tab_h * 0.5),
-                        vec2(18.0, tab_h),
-                    );
-                    let resp = ui.interact(tab_rect, ui.scope_id().with("pdf-studio-tab-btn"), Sense::click());
-                    let bg = if resp.hovered() { th.hover } else { th.chrome };
-                    let cr = egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 };
-                    ui.painter().rect_filled(tab_rect, cr, bg);
-                    ui.painter().rect_stroke(tab_rect, cr, Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
-                    let glyph = if self.pdf_panel_collapsed { "‹" } else { "›" };
-                    let glyph_col = if resp.hovered() || self.pdf_panel_collapsed { th.accent } else { th.text };
-                    ui.painter().text(
-                        tab_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        glyph,
-                        egui::FontId::proportional(15.0),
-                        glyph_col,
-                    );
-                    let tip = if self.pdf_panel_collapsed { "Show PDF Editor panel" } else { "Hide PDF Editor panel" };
-                    if resp.on_hover_text(tip).clicked() {
-                        self.pdf_panel_collapsed = !self.pdf_panel_collapsed;
-                    }
+                    modernrust::edge_collapse_tab(ui, &mr, &mut self.pdf_panel_collapsed, "PDF Editor panel");
                 });
         }
 
@@ -3505,20 +3548,8 @@ impl eframe::App for App {
 
         dialogs::show(self, &ctx);
 
-        if let Some((msg, t0)) = self.toast.clone() {
-            let t0 = if t0 < 0.0 { now } else { t0 };
-            self.toast = Some((msg.clone(), t0));
-            if now - t0 > 4.0 {
-                self.toast = None;
-            } else {
-                egui::Area::new(egui::Id::unique("toast")).anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -48.0)).show(&ctx, |ui| {
-                    Frame::new().fill(Color32::from_rgb(31, 41, 55)).corner_radius(8).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
-                        ui.label(RichText::new(msg).color(Color32::WHITE));
-                    });
-                });
-                ctx.request_repaint_after(std::time::Duration::from_millis(250));
-            }
-        }
+        let mr_pal = self.mr_palette();
+        self.toasts.show(&ctx, &mr_pal);
 
         self.run_actions(&ctx);
         self.autosave(now);
@@ -3570,7 +3601,7 @@ mod tests {
             screenshot: None,
             shot_done: Arc::new(AtomicBool::new(false)),
             frame: 0,
-            toast: None,
+            toasts: modernrust::ToastStack::default(),
             last_autosave: 0.0,
             title: String::new(),
             close_flow: CloseFlow::None,
@@ -3843,5 +3874,60 @@ mod tests {
             tab.show(ui, &opts, doc_id, &mut cmds);
         });
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn independent_header_and_footer_scopes_and_tokens() {
+        use crate::doc::{from_json, to_json, HfScope};
+
+        let mut doc = Document::default();
+        doc.info.title = "Annual Plan".into();
+
+        // Header: different first page + odd pages only for subsequent pages
+        doc.header_different_first = true;
+        doc.header_first = "Cover — {title}".into();
+        doc.header = "Running Header (Odd)".into();
+        doc.header_scope = HfScope::OddOnly;
+
+        // Footer: completely independent (even pages only + Page X of Y + Strictly Confidential)
+        doc.footer_different_first = false;
+        doc.footer = "Strictly Confidential • Page {page} of {pages}".into();
+        doc.footer_scope = HfScope::EvenOnly;
+
+        // Page 1 (idx 0): first-page header, no footer (since 1 is odd and footer is EvenOnly)
+        assert_eq!(doc.resolved_header_text(0, 4).as_deref(), Some("Cover — Annual Plan"));
+        assert_eq!(doc.resolved_footer_text(0, 4), None);
+
+        // Page 2 (idx 1): no header (2 is even, header is OddOnly), footer shows Page 2 of 4
+        assert_eq!(doc.resolved_header_text(1, 4), None);
+        assert_eq!(
+            doc.resolved_footer_text(1, 4).as_deref(),
+            Some("Strictly Confidential • Page 2 of 4")
+        );
+
+        // Page 3 (idx 2): odd running header, no footer
+        assert_eq!(doc.resolved_header_text(2, 4).as_deref(), Some("Running Header (Odd)"));
+        assert_eq!(doc.resolved_footer_text(2, 4), None);
+
+        // Page 4 (idx 3): no header, footer shows Page 4 of 4
+        assert_eq!(doc.resolved_header_text(3, 4), None);
+        assert_eq!(
+            doc.resolved_footer_text(3, 4).as_deref(),
+            Some("Strictly Confidential • Page 4 of 4")
+        );
+
+        // FirstOnly scope check
+        doc.header_different_first = false;
+        doc.header_scope = HfScope::FirstOnly;
+        assert_eq!(doc.resolved_header_text(0, 4).as_deref(), Some("Running Header (Odd)"));
+        assert_eq!(doc.resolved_header_text(1, 4), None);
+
+        // JSON (.wpx) round-trip preserves all independent header/footer fields
+        let json = to_json(&doc);
+        let reloaded = from_json(&json).expect("wpx json roundtrip");
+        assert_eq!(reloaded.header_scope, HfScope::FirstOnly);
+        assert_eq!(reloaded.footer_scope, HfScope::EvenOnly);
+        assert_eq!(reloaded.header_first, "Cover — {title}");
+        assert_eq!(reloaded.footer, "Strictly Confidential • Page {page} of {pages}");
     }
 }

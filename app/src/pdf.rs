@@ -266,11 +266,15 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
     let pt = lay.ppi / 72.0;
     let hf_size = 10.0 * pt;
     type RichFooterLayout = (Option<(f32, f32, f32, f32, [u8; 3])>, Vec<(FooterSegment, Arc<Galley>)>);
-    let (header_galley, rich_footer_galleys, footer_galleys, caption_galleys) = ctx.fonts_mut(|fonts| {
-        let hg = if !doc.header.is_empty() { Some(layout::hf_galley(fonts, book, doc, false, &doc.header, lay.ppi)) } else { None };
+    let (header_galleys, rich_footer_galleys, footer_galleys, caption_galleys) = ctx.fonts_mut(|fonts| {
+        let mut hgs: Vec<Option<Arc<Galley>>> = Vec::with_capacity(lay.pages);
         let mut rfgs: Vec<Option<RichFooterLayout>> = Vec::with_capacity(lay.pages);
         let mut fgs: Vec<Option<Arc<Galley>>> = Vec::with_capacity(lay.pages);
         for k in 0..lay.pages {
+            hgs.push(
+                doc.resolved_header_text(k, lay.pages)
+                    .map(|hdr| layout::hf_galley(fonts, book, doc, false, &hdr, lay.ppi)),
+            );
             if let Some(pf) = doc.resolved_page_footer(k, lay.pages) {
                 let mut seg_gals = Vec::with_capacity(pf.segments.len());
                 for seg in &pf.segments {
@@ -296,16 +300,10 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 continue;
             }
             rfgs.push(None);
-            let mut foot = crate::doc::update_footer_page_nums(&doc.footer, k + 1, lay.pages);
-            if doc.page.page_numbers {
-                let pn = format!("Page {}", k + 1);
-                foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
-            }
-            if !foot.is_empty() {
-                fgs.push(Some(layout::hf_galley(fonts, book, doc, true, &foot, lay.ppi)));
-            } else {
-                fgs.push(None);
-            }
+            fgs.push(
+                doc.resolved_footer_text(k, lay.pages)
+                    .map(|foot| layout::hf_galley(fonts, book, doc, true, &foot, lay.ppi)),
+            );
         }
         let mut cgs: std::collections::HashMap<u64, Arc<Galley>> = std::collections::HashMap::new();
         for img in &doc.images {
@@ -323,7 +321,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
                 cgs.insert(img.id, fonts.layout_job(job));
             }
         }
-        (hg, rfgs, fgs, cgs)
+        (hgs, rfgs, fgs, cgs)
     });
 
     let atlas = ctx.fonts_mut(|f| f.image());
@@ -334,7 +332,7 @@ pub fn render_pages_rgba(ctx: &egui::Context, doc: &Document, book: &FontBook, d
 
     // 1. Header & Footer + Table cell backgrounds and borders on each page
     for (k, canvas) in canvases.iter_mut().enumerate() {
-        if let Some(hg) = &header_galley {
+        if let Some(Some(hg)) = header_galleys.get(k) {
             let gw = hg.rect.width();
             let gh = hg.rect.height();
             let hx = match doc.header_align {
@@ -818,23 +816,20 @@ pub fn export_page_range(
         None => (0, total_pages),
     };
 
-    // Measure headers/footers with the exact egui font galleys for pixel-aligned centering
-    let mut header_galley: Option<Arc<Galley>> = None;
-    let mut footer_galleys: Vec<Option<Arc<Galley>>> = vec![None; total_pages];
+    // Measure headers/footers per page with the exact egui font galleys for pixel-aligned centering
+    let mut header_galleys: Vec<Option<(String, Arc<Galley>)>> = vec![None; total_pages];
+    let mut footer_galleys: Vec<Option<(String, Arc<Galley>)>> = vec![None; total_pages];
     let mut caption_galleys: HashMap<u64, Arc<Galley>> = HashMap::new();
     ctx.fonts_mut(|fonts| {
-        if !doc.header.is_empty() {
-            header_galley = Some(layout::hf_galley(fonts, book, doc, false, &doc.header, lay.ppi));
-        }
         for k in start_p..end_p {
+            if let Some(hdr) = doc.resolved_header_text(k, total_pages) {
+                let g = layout::hf_galley(fonts, book, doc, false, &hdr, lay.ppi);
+                header_galleys[k] = Some((hdr, g));
+            }
             if doc.resolved_page_footer(k, total_pages).is_none() {
-                let mut foot = crate::doc::update_footer_page_nums(&doc.footer, k + 1, total_pages);
-                if doc.page.page_numbers {
-                    let pn = format!("Page {}", k + 1);
-                    foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
-                }
-                if !foot.is_empty() {
-                    footer_galleys[k] = Some(layout::hf_galley(fonts, book, doc, true, &foot, lay.ppi));
+                if let Some(foot) = doc.resolved_footer_text(k, total_pages) {
+                    let g = layout::hf_galley(fonts, book, doc, true, &foot, lay.ppi);
+                    footer_galleys[k] = Some((foot, g));
                 }
             }
         }
@@ -1223,7 +1218,7 @@ pub fn export_page_range(
             }
 
             // 4. Header & Footer
-            if let Some(hg) = &header_galley {
+            if let Some((hdr_txt, hg)) = &header_galleys[page_idx] {
                 let st = layout::hf_style(doc, false);
                 let hw = hg.rect.width();
                 let hx = match doc.header_align {
@@ -1239,7 +1234,7 @@ pub fn export_page_range(
                         Point::from_xy(hx, top + st.size * 0.9),
                         fnt,
                         st.size.max(1.0),
-                        &doc.header,
+                        hdr_txt,
                         false,
                         TextDirection::Auto,
                     );
@@ -1278,12 +1273,7 @@ pub fn export_page_range(
                         cur_x += run.text.chars().count() as f32 * sz * 0.5;
                     }
                 }
-            } else if let Some(fg) = &footer_galleys[page_idx] {
-                let mut foot = crate::doc::update_footer_page_nums(&doc.footer, page_idx + 1, total_pages);
-                if pg.page_numbers {
-                    let pn = format!("Page {}", page_idx + 1);
-                    foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
-                }
+            } else if let Some((foot, fg)) = &footer_galleys[page_idx] {
                 let st = layout::hf_style(doc, true);
                 let fw = fg.rect.width();
                 let fx = match doc.footer_align {
@@ -1299,7 +1289,7 @@ pub fn export_page_range(
                         Point::from_xy(fx, top + st.size * 0.9),
                         fnt,
                         st.size.max(1.0),
-                        &foot,
+                        foot,
                         false,
                         TextDirection::Auto,
                     );

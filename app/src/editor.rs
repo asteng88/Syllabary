@@ -2911,9 +2911,9 @@ impl Tab {
             }
             if opts.header_footer && !lay.draft {
                 let pt = lay.ppi / 72.0;
-                if !self.doc.header.is_empty() {
+                if let Some(hdr_txt) = self.doc.resolved_header_text(k, lay.pages) {
                     let gal = ui.ctx().fonts_mut(|f| {
-                        layout::hf_galley(f, opts.book, &self.doc, false, &self.doc.header, lay.ppi)
+                        layout::hf_galley(f, opts.book, &self.doc, false, &hdr_txt, lay.ppi)
                     });
                     let gw = gal.rect.width();
                     let gh = gal.rect.height();
@@ -2984,27 +2984,19 @@ impl Tab {
                             .clamp(r.min.y + 1.0 * pt, (r.max.y - gh - 1.0 * pt).max(r.min.y));
                         painter.galley(pos2(fx, fy), gal, Color32::BLACK);
                     }
-                } else {
-                    let mut foot =
-                        crate::doc::update_footer_page_nums(&self.doc.footer, k + 1, lay.pages);
-                    if self.doc.page.page_numbers {
-                        let pn = format!("Page {}", k + 1);
-                        foot = if foot.is_empty() { pn } else { format!("{foot}    {pn}") };
-                    }
-                    if !foot.is_empty() {
-                        let gal = ui.ctx().fonts_mut(|f| {
-                            layout::hf_galley(f, opts.book, &self.doc, true, &foot, lay.ppi)
-                        });
-                        let gw = gal.rect.width();
-                        let gh = gal.rect.height();
-                        let fx = match self.doc.footer_align {
-                            Align::Left | Align::Justify => content.min.x,
-                            Align::Center => content.center().x - gw * 0.5,
-                            Align::Right => (content.max.x - gw).max(content.min.x),
-                        };
-                        let fy = r.min.y + layout::hf_y(&self.doc, &lay, true, gh);
-                        painter.galley(pos2(fx, fy), gal, Color32::BLACK);
-                    }
+                } else if let Some(foot) = self.doc.resolved_footer_text(k, lay.pages) {
+                    let gal = ui.ctx().fonts_mut(|f| {
+                        layout::hf_galley(f, opts.book, &self.doc, true, &foot, lay.ppi)
+                    });
+                    let gw = gal.rect.width();
+                    let gh = gal.rect.height();
+                    let fx = match self.doc.footer_align {
+                        Align::Left | Align::Justify => content.min.x,
+                        Align::Center => content.center().x - gw * 0.5,
+                        Align::Right => (content.max.x - gw).max(content.min.x),
+                    };
+                    let fy = r.min.y + layout::hf_y(&self.doc, &lay, true, gh);
+                    painter.galley(pos2(fx, fy), gal, Color32::BLACK);
                 }
             }
 

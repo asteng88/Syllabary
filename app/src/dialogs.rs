@@ -1774,63 +1774,54 @@ fn print_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, cfg: &mut c
 }
 
 fn confirmations(app: &mut App, ctx: &egui::Context) {
+    let mr = app.mr_palette();
     match app.close_flow {
         crate::app::CloseFlow::None | crate::app::CloseFlow::ForceQuit => {}
         crate::app::CloseFlow::ConfirmTab(idx) => {
             let name = app.tabs.get(idx).map(|t| t.name.clone()).unwrap_or_default();
-            let mut choice = 0;
-            egui::Modal::new(egui::Id::unique("confirm-close")).show(ctx, |ui| {
-                ui.set_max_width(380.0);
-                ui.heading("Save changes?");
-                ui.label(format!("\"{name}\" has changes that haven't been saved."));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        choice = 1;
-                    }
-                    if ui.button("Don't save").clicked() {
-                        choice = 2;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        choice = 3;
-                    }
+            let msg = format!("\"{name}\" has changes that haven't been saved.");
+            let mut outcome = modernrust::PromptOutcome::Pending;
+            egui::Modal::new(egui::Id::unique("confirm-close"))
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    ui.set_max_width(400.0);
+                    outcome = modernrust::PromptBox::new("Save changes?", &msg)
+                        .role(modernrust::Role::Warning)
+                        .confirm_label("Save")
+                        .secondary_label("Don't save")
+                        .cancel_label("Cancel")
+                        .show_inline(ui, &mr);
                 });
-            });
-            match choice {
-                1 => {
+            match outcome {
+                modernrust::PromptOutcome::Confirm => {
                     app.close_flow = crate::app::CloseFlow::None;
                     app.save_then_close(idx);
                 }
-                2 => {
+                modernrust::PromptOutcome::Secondary => {
                     app.close_flow = crate::app::CloseFlow::None;
                     app.close_tab(idx, true);
                 }
-                3 => app.close_flow = crate::app::CloseFlow::None,
-                _ => {}
+                modernrust::PromptOutcome::Cancel => app.close_flow = crate::app::CloseFlow::None,
+                modernrust::PromptOutcome::Pending => {}
             }
         }
         crate::app::CloseFlow::ConfirmQuit => {
             let n = app.tabs.iter().filter(|t| t.dirty).count();
-            let mut choice = 0;
-            egui::Modal::new(egui::Id::unique("confirm-quit")).show(ctx, |ui| {
-                ui.set_max_width(400.0);
-                ui.heading("Unsaved documents");
-                ui.label(format!("{n} document(s) have changes that haven't been saved."));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Save all").clicked() {
-                        choice = 1;
-                    }
-                    if ui.button("Quit without saving").clicked() {
-                        choice = 2;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        choice = 3;
-                    }
+            let msg = format!("{n} document(s) have changes that haven't been saved.");
+            let mut outcome = modernrust::PromptOutcome::Pending;
+            egui::Modal::new(egui::Id::unique("confirm-quit"))
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    outcome = modernrust::PromptBox::new("Unsaved documents", &msg)
+                        .role(modernrust::Role::Warning)
+                        .confirm_label("Save all")
+                        .secondary_label("Quit without saving")
+                        .cancel_label("Cancel")
+                        .show_inline(ui, &mr);
                 });
-            });
-            match choice {
-                1 => {
+            match outcome {
+                modernrust::PromptOutcome::Confirm => {
                     app.close_flow = crate::app::CloseFlow::None;
                     let mut ok = true;
                     for i in 0..app.tabs.len() {
@@ -1843,11 +1834,11 @@ fn confirmations(app: &mut App, ctx: &egui::Context) {
                         app.force_quit(ctx);
                     }
                 }
-                2 => {
+                modernrust::PromptOutcome::Secondary => {
                     app.force_quit(ctx);
                 }
-                3 => app.close_flow = crate::app::CloseFlow::None,
-                _ => {}
+                modernrust::PromptOutcome::Cancel => app.close_flow = crate::app::CloseFlow::None,
+                modernrust::PromptOutcome::Pending => {}
             }
         }
     }

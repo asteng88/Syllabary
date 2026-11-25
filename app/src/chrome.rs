@@ -193,38 +193,15 @@ impl App {
 
                 // Mode selector pill (Editing / Suggesting / Viewing)
                 if let Some(pdf_mode @ (crate::editor::PdfMode::Read | crate::editor::PdfMode::Edit)) = self.tab_ref().pdf_mode() {
-                    let (seg_rect, _) = ui.allocate_exact_size(vec2(114.0, 26.0), Sense::hover());
-                    ui.painter().rect_filled(seg_rect, 13.0, th.surface_subtle);
-                    ui.painter().rect_stroke(seg_rect, 13.0, Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
-                    let half = seg_rect.width() * 0.5;
-                    for (idx, (lbl, target_m, tip)) in [
-                        ("Read", crate::editor::PdfMode::Read, "Read mode — clean pixel-accurate PDF view"),
-                        ("Edit", crate::editor::PdfMode::Edit, "Edit mode — click any text on the PDF to edit in place"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        let r = egui::Rect::from_min_size(
-                            pos2(seg_rect.min.x + idx as f32 * half, seg_rect.min.y),
-                            vec2(half, seg_rect.height()),
-                        );
-                        let resp = ui.interact(r, ui.scope_id().with(("pdf_mode_seg", idx)), Sense::click()).on_hover_text(tip);
-                        let active = pdf_mode == target_m;
-                        if active {
-                            ui.painter().rect_filled(r.shrink(2.0), 11.0, th.accent);
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(r.shrink(2.0), 11.0, th.hover);
-                        }
-                        ui.painter().text(
-                            r.center(),
-                            egui::Align2::CENTER_CENTER,
-                            lbl,
-                            FontId::proportional(12.0),
-                            if active { Color32::WHITE } else { th.text },
-                        );
-                        if resp.clicked() && !active {
-                            self.act(Action::SetPdfMode(target_m));
-                        }
+                    let mr = self.mr_palette();
+                    let mut sel = if pdf_mode == crate::editor::PdfMode::Edit { 1 } else { 0 };
+                    if modernrust::segmented_pill(ui, &mr, "pdf_mode", &["Read", "Edit"], &mut sel) {
+                        let target = if sel == 1 {
+                            crate::editor::PdfMode::Edit
+                        } else {
+                            crate::editor::PdfMode::Read
+                        };
+                        self.act(Action::SetPdfMode(target));
                     }
                 } else {
                     let mode_r = combo_box_button(ui, th, 108.0, self.mode.label(), FontId::proportional(12.5), "Document mode (Editing / Suggesting / Viewing)");
@@ -998,10 +975,10 @@ impl App {
             ui.menu_button("Headers & footers", |ui| {
                 fit_menu(ui, &[("Header…", ""), ("Footer…", "")]);
                 if mitem(ui, th, Icon::PageSetup, "Header…", "") {
-                    self.act(Action::Dialog(Dialog::PageSetup));
+                    self.act(Action::OpenHeadersFooters);
                 }
                 if mitem(ui, th, Icon::PageSetup, "Footer…", "") {
-                    self.act(Action::Dialog(Dialog::PageSetup));
+                    self.act(Action::OpenHeadersFooters);
                 }
             });
             ui.menu_button("Page numbers", |ui| {
@@ -1299,7 +1276,7 @@ impl App {
 
             ui.separator();
             if mitem(ui, th, Icon::PageSetup, "Headers & footers…", "") {
-                self.act(Action::Dialog(Dialog::PageSetup));
+                self.act(Action::OpenHeadersFooters);
             }
             ui.menu_button("Page orientation", |ui| {
                 let mut orient_entries: Vec<(&str, &str)> = vec![("Portrait", ""), ("Landscape", "")];
@@ -2351,6 +2328,329 @@ impl App {
                     self.toast(format!("Restored version “{}”", v.name));
                 }
             }
+        }
+    }
+
+    /// Right-hand studio side panel for independent Header & Footer rules, quick insertions,
+    /// alignment, and live page preview (no modal popup blocking the document).
+    pub fn headers_footers_pane(&mut self, ui: &mut egui::Ui, th: &Theme, now: f64) {
+        use crate::doc::HfScope;
+        let mr = self.mr_palette();
+
+        if modernrust::side_panel_header(ui, &mr, "Headers & Footers", Some("Live")) {
+            self.right_panel = crate::app::RightPanel::None;
+        }
+        ui.horizontal(|ui| {
+            let _ = ui.selectable_label(true, "Headers & Footers");
+            if ui.selectable_label(false, "Page Setup").clicked() {
+                self.right_panel = crate::app::RightPanel::PageSetup;
+            }
+        });
+        ui.add_space(4.0);
+
+        let t = self.tab_ref();
+        let mut header = t.doc.header.clone();
+        let mut header_first = t.doc.header_first.clone();
+        let mut header_diff_first = t.doc.header_different_first;
+        let mut header_scope = t.doc.header_scope;
+        let mut header_align = t.doc.header_align;
+        let mut header_italic = t.doc.header_italic;
+
+        let mut footer = t.doc.footer.clone();
+        let mut footer_first = t.doc.footer_first.clone();
+        let mut footer_diff_first = t.doc.footer_different_first;
+        let mut footer_scope = t.doc.footer_scope;
+        let mut footer_align = t.doc.footer_align;
+        let mut footer_italic = t.doc.footer_italic;
+        let mut page_numbers = t.doc.page.page_numbers;
+        let total_pages = t.cached_pages().max(3);
+
+        let quick_chips: &[(&str, &str)] = &[
+            ("Page #", "{page}"),
+            ("Page X of Y", "Page {page} of {pages}"),
+            ("Strictly Confidential", "Strictly Confidential"),
+            ("Confidential", "Confidential — Internal Use Only"),
+            ("Draft", "DRAFT"),
+            ("Date", "{date}"),
+            ("Title", "{title}"),
+        ];
+        let append_chip = |target: &mut String, snippet: &str| {
+            if target.trim().is_empty() {
+                target.push_str(snippet);
+            } else {
+                target.push_str("  •  ");
+                target.push_str(snippet);
+            }
+        };
+
+        egui::ScrollArea::vertical().id_salt("hf-panel-scroll").show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 7.0;
+
+            // ── HEADER SECTION (independent of Footer) ───────────────────
+            ui.label(RichText::new("HEADER").size(11.0).color(th.accent).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Show on:").small().weak());
+                egui::ComboBox::from_id_salt("hdr-scope")
+                    .selected_text(header_scope.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for sc in [HfScope::All, HfScope::FirstOnly, HfScope::OddOnly, HfScope::EvenOnly] {
+                            ui.selectable_value(&mut header_scope, sc, sc.label());
+                        }
+                    });
+            });
+            modernrust::fluent_switch(ui, &mr, "Different first page header", &mut header_diff_first);
+            if header_diff_first {
+                ui.label(RichText::new("First page header").small().weak());
+                ui.add(
+                    egui::TextEdit::singleline(&mut header_first)
+                        .desired_width(ui.available_width())
+                        .hint_text("Header on page 1 only (leave blank for none)"),
+                );
+                ui.label(RichText::new("Subsequent pages header").small().weak());
+            } else {
+                ui.label(RichText::new("Header text").small().weak());
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut header)
+                    .desired_width(ui.available_width())
+                    .hint_text("e.g. Company Name • {title}"),
+            );
+            ui.label(RichText::new("Quick insert into header:").small().weak());
+            ui.horizontal_wrapped(|ui| {
+                for &(lbl, tok) in quick_chips {
+                    if modernrust::chip(ui, &mr, lbl, header.contains(tok)).clicked() {
+                        append_chip(&mut header, tok);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut header_align, Align::Left, "Left");
+                ui.selectable_value(&mut header_align, Align::Center, "Center");
+                ui.selectable_value(&mut header_align, Align::Right, "Right");
+                ui.separator();
+                ui.checkbox(&mut header_italic, "Italic");
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+
+            // ── FOOTER SECTION (independent of Header) ───────────────────
+            ui.label(RichText::new("FOOTER").size(11.0).color(th.accent).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Show on:").small().weak());
+                egui::ComboBox::from_id_salt("ftr-scope")
+                    .selected_text(footer_scope.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for sc in [HfScope::All, HfScope::FirstOnly, HfScope::OddOnly, HfScope::EvenOnly] {
+                            ui.selectable_value(&mut footer_scope, sc, sc.label());
+                        }
+                    });
+            });
+            modernrust::fluent_switch(ui, &mr, "Different first page footer", &mut footer_diff_first);
+            if footer_diff_first {
+                ui.label(RichText::new("First page footer").small().weak());
+                ui.add(
+                    egui::TextEdit::singleline(&mut footer_first)
+                        .desired_width(ui.available_width())
+                        .hint_text("Footer on page 1 only (leave blank for none)"),
+                );
+                ui.label(RichText::new("Subsequent pages footer").small().weak());
+            } else {
+                ui.label(RichText::new("Footer text").small().weak());
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut footer)
+                    .desired_width(ui.available_width())
+                    .hint_text("e.g. Strictly Confidential • Page {page} of {pages}"),
+            );
+            ui.label(RichText::new("Quick insert into footer:").small().weak());
+            ui.horizontal_wrapped(|ui| {
+                for &(lbl, tok) in quick_chips {
+                    if modernrust::chip(ui, &mr, lbl, footer.contains(tok)).clicked() {
+                        append_chip(&mut footer, tok);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut footer_align, Align::Left, "Left");
+                ui.selectable_value(&mut footer_align, Align::Center, "Center");
+                ui.selectable_value(&mut footer_align, Align::Right, "Right");
+                ui.separator();
+                ui.checkbox(&mut footer_italic, "Italic");
+            });
+            modernrust::fluent_switch(ui, &mr, "Auto append \"Page N\"", &mut page_numbers);
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(RichText::new("PREVIEW (PAGES 1–3)").size(10.5).color(th.subtle).strong());
+            let doc_ref = &self.tab_ref().doc;
+            for p_idx in 0..3 {
+                let h = doc_ref.resolved_header_text(p_idx, total_pages).unwrap_or_else(|| "—".into());
+                let f = doc_ref.resolved_footer_text(p_idx, total_pages).unwrap_or_else(|| "—".into());
+                ui.label(
+                    RichText::new(format!("Pg {}:  H: {}  |  F: {}", p_idx + 1, h, f))
+                        .small()
+                        .weak(),
+                );
+            }
+        });
+
+        let t = self.tab();
+        let changed = header != t.doc.header
+            || header_first != t.doc.header_first
+            || header_diff_first != t.doc.header_different_first
+            || header_scope != t.doc.header_scope
+            || header_align != t.doc.header_align
+            || header_italic != t.doc.header_italic
+            || footer != t.doc.footer
+            || footer_first != t.doc.footer_first
+            || footer_diff_first != t.doc.footer_different_first
+            || footer_scope != t.doc.footer_scope
+            || footer_align != t.doc.footer_align
+            || footer_italic != t.doc.footer_italic
+            || page_numbers != t.doc.page.page_numbers;
+        if changed {
+            let footer_content_changed = footer != t.doc.footer
+                || footer_first != t.doc.footer_first
+                || footer_diff_first != t.doc.footer_different_first
+                || footer_scope != t.doc.footer_scope
+                || page_numbers != t.doc.page.page_numbers;
+            t.checkpoint(crate::editor::EditKind::Typing, now);
+            t.doc.header = header;
+            t.doc.header_first = header_first;
+            t.doc.header_different_first = header_diff_first;
+            t.doc.header_scope = header_scope;
+            t.doc.header_align = header_align;
+            t.doc.header_italic = header_italic;
+            t.doc.footer = footer;
+            t.doc.footer_first = footer_first;
+            t.doc.footer_different_first = footer_diff_first;
+            t.doc.footer_scope = footer_scope;
+            t.doc.footer_align = footer_align;
+            t.doc.footer_italic = footer_italic;
+            t.doc.page.page_numbers = page_numbers;
+            if footer_content_changed {
+                t.doc.page_footers.clear();
+            }
+            t.changed();
+        }
+    }
+
+    /// Right-hand studio side panel for Page Setup (Pages/Pageless, paper size, orientation,
+    /// margins, and page color) — live updating without a modal popup.
+    pub fn page_setup_pane(&mut self, ui: &mut egui::Ui, th: &Theme, now: f64) {
+        let mr = self.mr_palette();
+        if modernrust::side_panel_header(ui, &mr, "Page Setup", None) {
+            self.right_panel = crate::app::RightPanel::None;
+        }
+        ui.horizontal(|ui| {
+            if ui.selectable_label(false, "Headers & Footers").clicked() {
+                self.right_panel = crate::app::RightPanel::HeadersFooters;
+            }
+            let _ = ui.selectable_label(true, "Page Setup");
+        });
+        ui.add_space(4.0);
+
+        let t = self.tab_ref();
+        let mut pg = t.doc.page;
+        let mut pageless = t.doc.pageless;
+
+        egui::ScrollArea::vertical().id_salt("ps-panel-scroll").show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut pageless, false, "📄 Pages");
+                ui.selectable_value(&mut pageless, true, "📜 Pageless");
+            });
+            ui.separator();
+            if pageless {
+                ui.label(RichText::new("Pageless format").strong());
+                ui.label(RichText::new("Continuous flow without page breaks for wide tables and long notes.").small().weak());
+            } else {
+                let land = pg.width > pg.height;
+                ui.label(RichText::new("Paper Size").size(11.5).color(th.subtle).strong());
+                let cur = crate::doc::PAGE_SIZES.iter().find(|(_, w, h)| {
+                    let (pw, ph) = if land { (*h, *w) } else { (*w, *h) };
+                    (pw - pg.width).abs() < 0.01 && (ph - pg.height).abs() < 0.01
+                });
+                egui::ComboBox::from_id_salt("ps-panel-size")
+                    .selected_text(cur.map_or("Custom", |c| c.0))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for (name, w, h) in crate::doc::PAGE_SIZES {
+                            if ui.selectable_label(cur.is_some_and(|c| c.0 == *name), *name).clicked() {
+                                if land {
+                                    pg.width = *h;
+                                    pg.height = *w;
+                                } else {
+                                    pg.width = *w;
+                                    pg.height = *h;
+                                }
+                            }
+                        }
+                    });
+
+                ui.label(RichText::new("Orientation").size(11.5).color(th.subtle).strong());
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(!land, "Portrait").clicked() && land {
+                        std::mem::swap(&mut pg.width, &mut pg.height);
+                    }
+                    if ui.selectable_label(land, "Landscape").clicked() && !land {
+                        std::mem::swap(&mut pg.width, &mut pg.height);
+                    }
+                });
+
+                ui.label(RichText::new("Margins (inches)").size(11.5).color(th.subtle).strong());
+                let max_lr = (pg.width / 2.0 - 0.5).max(0.0);
+                let max_tb = (pg.height / 2.0 - 0.5).max(0.0);
+                egui::Grid::new("ps-panel-margins").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
+                    for (label, v, max) in [
+                        ("Top", &mut pg.margin_top, max_tb),
+                        ("Bottom", &mut pg.margin_bottom, max_tb),
+                        ("Left", &mut pg.margin_left, max_lr),
+                        ("Right", &mut pg.margin_right, max_lr),
+                    ] {
+                        ui.label(label);
+                        ui.add(egui::DragValue::new(v).range(0.0..=max).speed(0.05).fixed_decimals(2).suffix(" in"));
+                        ui.end_row();
+                    }
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("Page Color").size(11.5).color(th.subtle).strong());
+            ui.horizontal(|ui| {
+                for c in [
+                    [255u8, 255, 255],
+                    [255, 253, 245],
+                    [250, 247, 240],
+                    [245, 248, 255],
+                    [244, 250, 246],
+                    [255, 247, 250],
+                    [248, 248, 248],
+                ] {
+                    let (sr, sresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                    ui.painter().rect_filled(sr, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
+                    let st = if pg.background == c {
+                        Stroke::new(2.0, th.accent)
+                    } else {
+                        Stroke::new(1.0, th.border)
+                    };
+                    ui.painter().rect_stroke(sr, 4.0, st, egui::StrokeKind::Inside);
+                    if sresp.clicked() {
+                        pg.background = c;
+                    }
+                }
+            });
+        });
+
+        let t = self.tab();
+        if pg != t.doc.page || pageless != t.doc.pageless {
+            t.checkpoint(crate::editor::EditKind::Typing, now);
+            t.doc.page = pg;
+            t.doc.pageless = pageless;
+            t.changed();
         }
     }
 }

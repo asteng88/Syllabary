@@ -228,6 +228,67 @@ fn draw_page_sheet(p: &Painter, pt: impl Fn(f32, f32) -> Pos2, u: f32, fill: Col
 }
 
 pub fn draw(p: &Painter, r: Rect, icon: Icon, fg: Color32, accent: Color32) {
+    // Delegate shared chrome, navigation, and document icons to ModernRust's persistent
+    // 24x24 SVG + resvg HiDPI renderer for studio-grade anti-aliased clarity.
+    let mr_icon = match icon {
+        Icon::Save => Some(modernrust::Icon::Save),
+        Icon::Print => Some(modernrust::Icon::Print),
+        Icon::Pdf => Some(modernrust::Icon::Pdf),
+        Icon::Undo => Some(modernrust::Icon::Undo),
+        Icon::Redo => Some(modernrust::Icon::Redo),
+        Icon::Find | Icon::SearchMenus => Some(modernrust::Icon::Search),
+        Icon::AlignLeft => Some(modernrust::Icon::AlignLeft),
+        Icon::AlignCenter => Some(modernrust::Icon::AlignCenter),
+        Icon::AlignRight => Some(modernrust::Icon::AlignRight),
+        Icon::AlignJustify => Some(modernrust::Icon::AlignJustify),
+        Icon::Sun => Some(modernrust::Icon::Sun),
+        Icon::Moon => Some(modernrust::Icon::Moon),
+        Icon::Close => Some(modernrust::Icon::Close),
+        Icon::Link => Some(modernrust::Icon::Link),
+        Icon::Comment => Some(modernrust::Icon::Comment),
+        Icon::HeaderFooter => Some(modernrust::Icon::HeaderFooter),
+        Icon::Trash => Some(modernrust::Icon::Trash),
+        Icon::VersionHistory => Some(modernrust::Icon::History),
+        Icon::Preferences => Some(modernrust::Icon::Settings),
+        Icon::About => Some(modernrust::Icon::Info),
+        Icon::ChevronUp => Some(modernrust::Icon::ChevronUp),
+        Icon::ChevronDown => Some(modernrust::Icon::ChevronDown),
+        Icon::Check => Some(modernrust::Icon::Check),
+        Icon::Plus => Some(modernrust::Icon::Plus),
+        Icon::Minus => Some(modernrust::Icon::Minus),
+        Icon::Table => Some(modernrust::Icon::Table),
+        Icon::DateTime => Some(modernrust::Icon::Calendar),
+        Icon::EditMode => Some(modernrust::Icon::Edit),
+        Icon::Bold => Some(modernrust::Icon::Bold),
+        Icon::Italic => Some(modernrust::Icon::Italic),
+        Icon::Underline => Some(modernrust::Icon::Underline),
+        Icon::Strike => Some(modernrust::Icon::Strike),
+        Icon::TextColor => Some(modernrust::Icon::TextColor),
+        Icon::Highlight => Some(modernrust::Icon::Highlight),
+        Icon::Bullets => Some(modernrust::Icon::Bullets),
+        Icon::Numbers => Some(modernrust::Icon::Numbers),
+        Icon::Checklist => Some(modernrust::Icon::Checklist),
+        Icon::Indent => Some(modernrust::Icon::Indent),
+        Icon::Outdent => Some(modernrust::Icon::Outdent),
+        Icon::LineSpacing => Some(modernrust::Icon::LineSpacing),
+        Icon::Clear => Some(modernrust::Icon::ClearFormat),
+        Icon::Cut => Some(modernrust::Icon::Cut),
+        Icon::Copy => Some(modernrust::Icon::Copy),
+        Icon::Paste | Icon::PastePlain => Some(modernrust::Icon::Paste),
+        Icon::FormatPainter => Some(modernrust::Icon::FormatPainter),
+        Icon::Spell => Some(modernrust::Icon::SpellCheck),
+        Icon::Image => Some(modernrust::Icon::Image),
+        Icon::New => Some(modernrust::Icon::NewDoc),
+        Icon::Star => Some(modernrust::Icon::Star),
+        Icon::StarFilled => Some(modernrust::Icon::StarFilled),
+        Icon::Quote => Some(modernrust::Icon::Quote),
+        Icon::Code => Some(modernrust::Icon::Code),
+        _ => None,
+    };
+    if let Some(mic) = mr_icon {
+        modernrust::icons::draw(p, r, mic, fg, accent);
+        return;
+    }
     let s = r.width().min(r.height());
     let u = (s / 15.5).max(1.25);
     let st = Stroke::new(u, fg);

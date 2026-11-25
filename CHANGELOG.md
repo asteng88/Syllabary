@@ -2,6 +2,22 @@
 
 All notable changes to **Syllabary** are documented in this file.
 
+## [0.2.3] - 2026-11-25
+
+### Added
+- **Independent Headers & Footers Side Panel (No Popups):**
+  - Moved **Headers & Footers** and **Page Setup** out of modal popups into docked right-hand studio side panels (`RightPanel::HeadersFooters` and `RightPanel::PageSetup`) with live on-page updates and a 3-page preview readout.
+  - Added independent page-scope rules (`HfScope`: **All pages**, **First page only**, **Odd pages only**, **Even pages only**) and independent **Different first page** toggles (`header_first` / `footer_first`) for headers and footers.
+  - Added one-click quick-insert chips and dynamic auto-filling tokens: **Page #** (`{page}`), **Page X of Y** (`Page {page} of {pages}`), **Strictly Confidential**, **Confidential — Internal Use Only**, **DRAFT**, **Date** (`{date}`), and **Title** (`{title}`), rendered consistently across the live canvas, print rasterizer, and `krilla` vector PDF export.
+- **ModernRust UI Library Integration (`P:\ModernRust`):**
+  - Integrated the standalone **`ModernRust`** crate for Windows 11 Fluent components: animated semantic `ToastStack` (with countdown progress bar), Fluent `PromptBox` confirmations, gliding `[ Read | Edit ]` segmented pill, `fluent_switch` toggles, quick-insert `chip` pills, `side_panel_header`, and docked `edge_collapse_tab`.
+  - Upgraded **53 toolbar, chrome, and editorial icons** (including **B**, *I*, U, S, Text Color, Highlight, Lists, Indents, Line Spacing, Clear Format, Clipboard, Format Painter, Spell Check, Image, Star, Quote, Code, Save, Print, PDF, Table, Headers, Moon, Sun, Settings, Undo/Redo, Align) to ModernRust's persistent `24×24` SVG + `resvg` HiDPI renderer.
+
+### Fixed
+- **Toolbar Pill Centering:** Balanced the toolbar container's vertical margins (`Margin::symmetric(14, 6)`) so the floating toolbar pill sits vertically centered between its top and bottom border lines.
+
+---
+
 ## [0.2.2] - 2026-11-25
 
 ### Added

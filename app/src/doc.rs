@@ -1660,12 +1660,49 @@ pub struct PageFooter {
     pub rule: Option<(f32, f32, f32, f32, [u8; 3])>,
 }
 
+/// Which pages display a header or footer (configured independently for headers and footers).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum HfScope {
+    #[default]
+    All,
+    FirstOnly,
+    OddOnly,
+    EvenOnly,
+}
+
+impl HfScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All pages",
+            Self::FirstOnly => "First page only",
+            Self::OddOnly => "Odd pages only",
+            Self::EvenOnly => "Even pages only",
+        }
+    }
+
+    pub fn matches_page(self, page_idx: usize) -> bool {
+        let page_1 = page_idx + 1;
+        match self {
+            Self::All => true,
+            Self::FirstOnly => page_idx == 0,
+            Self::OddOnly => page_1 % 2 == 1,
+            Self::EvenOnly => page_1 % 2 == 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub paras: Vec<Para>,
     pub page: PageSetup,
     pub header: String,
     pub footer: String,
+    pub header_first: String,
+    pub footer_first: String,
+    pub header_different_first: bool,
+    pub footer_different_first: bool,
+    pub header_scope: HfScope,
+    pub footer_scope: HfScope,
     pub header_align: Align,
     pub footer_align: Align,
     pub header_italic: bool,
@@ -1701,6 +1738,12 @@ impl Default for Document {
             page: PageSetup::default(),
             header: String::new(),
             footer: String::new(),
+            header_first: String::new(),
+            footer_first: String::new(),
+            header_different_first: false,
+            footer_different_first: false,
+            header_scope: HfScope::All,
+            footer_scope: HfScope::All,
             header_align: Align::Center,
             footer_align: Align::Center,
             header_italic: false,
@@ -3316,6 +3359,72 @@ struct FilePara {
     runs: Vec<FileRun>,
 }
 
+/// Expands dynamic header/footer tokens (`{page}`, `{pages}`, `{title}`, `{date}`) and
+/// updates legacy `"Page N"` / `"Page N of M"` patterns for a 1-based page number.
+pub fn expand_hf_tokens(template: &str, page_1: usize, total_pages: usize, title: &str) -> String {
+    let total = total_pages.max(1);
+    let mut out = template
+        .replace("{page}", &page_1.to_string())
+        .replace("{pages}", &total.to_string())
+        .replace("{title}", if title.trim().is_empty() { "Untitled" } else { title.trim() });
+    if out.contains("{date}") {
+        let today = chrono::Local::now().format("%B %-d, %Y").to_string();
+        out = out.replace("{date}", &today);
+    }
+    update_footer_page_nums(&out, page_1, total)
+}
+
+impl Document {
+    /// Resolves the header text for `page_idx` (0-based) respecting `header_different_first`,
+    /// `header_first`, `header_scope` (`All` / `FirstOnly` / `OddOnly` / `EvenOnly`), and dynamic tokens.
+    pub fn resolved_header_text(&self, page_idx: usize, total_pages: usize) -> Option<String> {
+        let page_1 = page_idx + 1;
+        let raw = if page_idx == 0 && self.header_different_first {
+            self.header_first.as_str()
+        } else if self.header_scope.matches_page(page_idx) {
+            self.header.as_str()
+        } else {
+            return None;
+        };
+        let expanded = expand_hf_tokens(raw, page_1, total_pages, &self.info.title);
+        if expanded.trim().is_empty() {
+            None
+        } else {
+            Some(expanded)
+        }
+    }
+
+    /// Resolves the footer text for `page_idx` (0-based) respecting `footer_different_first`,
+    /// `footer_first`, `footer_scope` (independent of header), dynamic tokens, and `page.page_numbers`.
+    pub fn resolved_footer_text(&self, page_idx: usize, total_pages: usize) -> Option<String> {
+        let page_1 = page_idx + 1;
+        let (show_this_page, raw) = if page_idx == 0 && self.footer_different_first {
+            (true, self.footer_first.as_str())
+        } else if self.footer_scope.matches_page(page_idx) {
+            (true, self.footer.as_str())
+        } else {
+            (false, "")
+        };
+        if !show_this_page {
+            return None;
+        }
+        let mut foot = expand_hf_tokens(raw, page_1, total_pages, &self.info.title);
+        if self.page.page_numbers {
+            let pn = format!("Page {page_1}");
+            foot = if foot.trim().is_empty() {
+                pn
+            } else {
+                format!("{foot}    {pn}")
+            };
+        }
+        if foot.trim().is_empty() {
+            None
+        } else {
+            Some(foot)
+        }
+    }
+}
+
 /// Updates `"Page N"` or `"Page N of M"` patterns inside a footer string when page count changes.
 pub fn update_footer_page_nums(s: &str, page_1: usize, total_pages: usize) -> String {
     let lower = s.to_ascii_lowercase();
@@ -3372,6 +3481,18 @@ struct FileDoc {
     header: String,
     #[serde(default)]
     footer: String,
+    #[serde(default)]
+    header_first: String,
+    #[serde(default)]
+    footer_first: String,
+    #[serde(default)]
+    header_different_first: bool,
+    #[serde(default)]
+    footer_different_first: bool,
+    #[serde(default)]
+    header_scope: HfScope,
+    #[serde(default)]
+    footer_scope: HfScope,
     #[serde(default = "default_hf_align")]
     header_align: Align,
     #[serde(default = "default_hf_align")]
@@ -3426,6 +3547,12 @@ pub fn to_json(doc: &Document) -> String {
         page: doc.page,
         header: doc.header.clone(),
         footer: doc.footer.clone(),
+        header_first: doc.header_first.clone(),
+        footer_first: doc.footer_first.clone(),
+        header_different_first: doc.header_different_first,
+        footer_different_first: doc.footer_different_first,
+        header_scope: doc.header_scope,
+        footer_scope: doc.footer_scope,
         header_align: doc.header_align,
         footer_align: doc.footer_align,
         header_italic: doc.header_italic,
@@ -3481,6 +3608,12 @@ pub fn from_json(s: &str) -> Result<Document, String> {
         page: fd.page,
         header: fd.header,
         footer: fd.footer,
+        header_first: fd.header_first,
+        footer_first: fd.footer_first,
+        header_different_first: fd.header_different_first,
+        footer_different_first: fd.footer_different_first,
+        header_scope: fd.header_scope,
+        footer_scope: fd.footer_scope,
         header_align: fd.header_align,
         footer_align: fd.footer_align,
         header_italic: fd.header_italic,
