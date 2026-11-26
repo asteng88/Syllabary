@@ -1,0 +1,45 @@
+name: Bug Report
+description: Report a crash, rendering issue, or document import/export bug in Syllabary
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Syllabary Version
+      placeholder: "e.g. v0.2.7"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux (Fedora)
+        - Linux (Ubuntu / Debian)
+        - Linux (Arch / Other)
+        - macOS
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Open Syllabary
+        2. Open / create a document...
+        3. Click '...'
+  - type: textarea
+    id: context
+    attributes:
+      label: Screenshots or Sample File Notes
+      description: Attach screenshots or mention the file format (.wpx, .docx, .odt, .pdf, .md, .rtf).

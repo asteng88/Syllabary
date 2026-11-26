@@ -1,0 +1,30 @@
+name: Feature Request
+description: Suggest a new capability, format improvement, or UI polish for Syllabary
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem or workflow would this improve?
+      description: Describe what you're trying to accomplish in Syllabary.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe how you envision this feature working.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editor & Typography
+        - PDF / DOCX / ODT Import & Export
+        - UI / Themes / Studio Panels
+        - Linux / Fedora / Cross-Platform
+        - Installer & Auto-Updater
+        - Other
