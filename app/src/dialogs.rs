@@ -482,70 +482,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             });
         }
         Dialog::Prefs => {
-            let mut cfg = app.cfg.clone();
-            window("Preferences").open(&mut open).show(ctx, |ui| {
-                ui.set_min_width(380.0);
-                ui.heading("General");
-                ui.checkbox(&mut cfg.smart_quotes, "Use smart quotes (“ ”)");
-                ui.checkbox(&mut cfg.auto_links, "Automatically detect links");
-                ui.checkbox(&mut cfg.markdown_auto, "Automatically detect Markdown (# headings, * lists, [] checklists, ---)");
-                ui.checkbox(&mut cfg.smartcorrect, "Automatically correct spelling and substitutions");
-                ui.checkbox(&mut cfg.live_word_count, "Display word count while typing");
-                ui.add_space(6.0);
-                ui.heading("Shortcut keys");
-                ui.horizontal(|ui| {
-                    ui.label("Preset:");
-                    for p in ShortcutPreset::ALL {
-                        ui.selectable_value(&mut cfg.shortcut_preset, p, p.label());
-                    }
-                });
-                ui.add_space(6.0);
-                ui.heading("View & Appearance");
-                ui.checkbox(&mut cfg.dark, "Dark theme");
-                ui.checkbox(&mut cfg.margin_guides, "Show margin guides on the page");
-                ui.horizontal(|ui| {
-                    ui.label("Cursor:");
-                    ui.selectable_value(&mut cfg.block_cursor, false, "Line cursor");
-                    ui.selectable_value(&mut cfg.block_cursor, true, "Block cursor");
-                });
-                ui.add_space(6.0);
-                ui.heading("Timed save");
-                ui.horizontal(|ui| {
-                    ui.label("Keep a recovery copy every");
-                    ui.add(egui::DragValue::new(&mut cfg.autosave_min).range(0..=120));
-                    ui.label("minutes (0 = off)");
-                });
-                ui.label(RichText::new("Recovery copies stay on this computer only.").weak());
-                ui.add_space(6.0);
-                ui.heading("Privacy");
-                ui.label("Syllabary works 100% offline: it never connects to the internet.");
-            });
-            if cfg.dark != app.cfg.dark {
-                app.act(Action::ToggleDark);
-                cfg.dark = app.cfg.dark;
-            }
-            let changed = cfg.margin_guides != app.cfg.margin_guides
-                || cfg.block_cursor != app.cfg.block_cursor
-                || cfg.smartcorrect != app.cfg.smartcorrect
-                || cfg.smart_quotes != app.cfg.smart_quotes
-                || cfg.markdown_auto != app.cfg.markdown_auto
-                || cfg.auto_links != app.cfg.auto_links
-                || cfg.live_word_count != app.cfg.live_word_count
-                || cfg.autosave_min != app.cfg.autosave_min
-                || cfg.shortcut_preset != app.cfg.shortcut_preset;
-            if changed {
-                app.cfg.margin_guides = cfg.margin_guides;
-                app.cfg.block_cursor = cfg.block_cursor;
-                app.cfg.smartcorrect = cfg.smartcorrect;
-                app.cfg.smart_quotes = cfg.smart_quotes;
-                app.cfg.markdown_auto = cfg.markdown_auto;
-                app.cfg.auto_links = cfg.auto_links;
-                app.cfg.live_word_count = cfg.live_word_count;
-                app.cfg.autosave_min = cfg.autosave_min;
-                app.cfg.shortcut_preset = cfg.shortcut_preset;
-                app.save_config();
-                ctx.memory_mut(|m| m.request_focus(app.doc_id));
-            }
+            // Handled via RightPanel::Settings in app.rs.
+            open = false;
         }
         Dialog::SmartCorrect(mut from, mut to) => {
             let mut remove: Option<String> = None;
@@ -1130,6 +1068,7 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         (Icon::Pdf, "File > Download as PDF (.pdf)", "", Action::ExportPdf),
         (Icon::Save, "File > Download as Google Docs (.gdoc)", "", Action::ExportGdoc),
         (Icon::Save, "File > Download as Microsoft Word (.docx)", "", Action::ExportDocx),
+        (Icon::Save, "File > Download as OpenDocument Text (.odt)", "", Action::ExportOdt),
         (Icon::Save, "File > Download as Rich Text (.rtf)", "", Action::ExportRtf),
         (Icon::Save, "File > Download as Plain Text (.txt)", "", Action::ExportTxt),
         (Icon::Save, "File > Download as Markdown (.md)", "", Action::ExportMd),
@@ -1258,7 +1197,7 @@ fn search_menus_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, quer
         (Icon::Citation, "Tools > Citations & Bibliography", "", Action::Dialog(Dialog::Citations(CitationEntry::default()))),
         (Icon::Dictionary, "Tools > Dictionary / Define word", kp.dictionary(), Action::Dialog(Dialog::Dictionary)),
         (Icon::EditMode, "Tools > SmartCorrect / Auto-substitutions…", "", Action::Dialog(Dialog::SmartCorrect(String::new(), String::new()))),
-        (Icon::PageSetup, "Tools > Preferences", "", Action::Dialog(Dialog::Prefs)),
+        (Icon::Preferences, "Tools > Settings / Preferences", "", Action::Dialog(Dialog::Prefs)),
         // Window & Help
         (Icon::New, "Window > Next document tab", "Ctrl+Tab", Action::NextTab),
         (Icon::Close, "Window > Close all tabs", "", Action::CloseAll),

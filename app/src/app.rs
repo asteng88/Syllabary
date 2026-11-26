@@ -39,6 +39,7 @@ pub enum Action {
     ExportRtf,
     ExportTxt,
     ExportDocx,
+    ExportOdt,
     ExportGdoc,
     ExportPdf,
     ExportMd,
@@ -179,6 +180,7 @@ pub struct Config {
     pub spellcheck: bool,
     pub recent_fonts: Vec<u16>,
     pub shortcut_preset: ShortcutPreset,
+    pub assoc_extensions: Vec<String>,
 }
 
 impl Default for Config {
@@ -199,6 +201,7 @@ impl Default for Config {
             spellcheck: true,
             recent_fonts: Vec::new(),
             shortcut_preset: ShortcutPreset::default(),
+            assoc_extensions: crate::file_assoc::default_selected_extensions(),
         }
     }
 }
@@ -255,6 +258,7 @@ pub enum RightPanel {
     VersionHistory,
     HeadersFooters,
     PageSetup,
+    Settings,
 }
 
 impl RightPanel {
@@ -313,6 +317,7 @@ pub struct App {
     pub table_panel_collapsed: bool,
     pub pdf_panel_collapsed: bool,
     pub update: UpdateState,
+    pub assoc_status_msg: Option<(bool, String)>,
 }
 
 impl App {
@@ -375,6 +380,7 @@ impl App {
             table_panel_collapsed: false,
             pdf_panel_collapsed: false,
             update: UpdateState::default(),
+            assoc_status_msg: None,
         };
         crate::updater::cleanup_old_executable_backup();
         if app.screenshot.is_none()
@@ -539,6 +545,13 @@ impl App {
                     return;
                 }
             },
+            "odt" => match crate::odt::read(&bytes) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.toast(format!("Couldn't read that OpenDocument file: {e}"));
+                    return;
+                }
+            },
             "pdf" => match crate::pdf_import::read(&bytes) {
                 Ok(d) => d,
                 Err(e) => {
@@ -568,7 +581,7 @@ impl App {
             t.attach_pdf_exact_view(bytes);
         }
         self.next_id += 1;
-        if matches!(ext.as_str(), "wpx" | "gdoc" | "rtf" | "txt" | "docx" | "md" | "markdown" | "pdf") {
+        if matches!(ext.as_str(), "wpx" | "gdoc" | "rtf" | "txt" | "docx" | "odt" | "md" | "markdown" | "pdf") {
             t.path = Some(path.to_path_buf());
         }
         self.tabs.push(t);
@@ -609,6 +622,7 @@ impl App {
             "md" | "markdown" => doc::to_markdown(doc).into_bytes(),
             "html" | "htm" => doc::to_html(doc).into_bytes(),
             "docx" => crate::docx::write(doc),
+            "odt" => crate::odt::write(doc),
             "gdoc" => doc::to_gdoc(doc).into_bytes(),
             _ => doc::to_json(doc).into_bytes(),
         };
@@ -625,7 +639,7 @@ impl App {
                 .as_ref()
                 .and_then(|p| p.extension())
                 .map(|e| e.to_string_lossy().to_lowercase())
-                .filter(|e| matches!(e.as_str(), "wpx" | "gdoc" | "docx" | "pdf" | "md" | "rtf" | "txt"))
+                .filter(|e| matches!(e.as_str(), "wpx" | "gdoc" | "docx" | "odt" | "pdf" | "md" | "rtf" | "txt"))
                 .unwrap_or_else(|| FILE_EXT.to_string());
             match rfd::FileDialog::new()
                 .set_file_name(format!("{base}.{default_ext}"))
@@ -633,6 +647,7 @@ impl App {
                 .add_filter("PDF document", &["pdf"])
                 .add_filter("Google Docs", &["gdoc"])
                 .add_filter("Word document", &["docx"])
+                .add_filter("OpenDocument Text", &["odt"])
                 .add_filter("Markdown", &["md"])
                 .add_filter("Rich Text", &["rtf"])
                 .add_filter("Plain text", &["txt"])
@@ -753,6 +768,7 @@ impl App {
         let filter = match ext {
             "rtf" => "Rich Text",
             "docx" => "Word document",
+            "odt" => "OpenDocument Text",
             "gdoc" => "Google Docs",
             "md" => "Markdown",
             "html" => "Web Page (HTML)",
@@ -1172,7 +1188,8 @@ impl App {
                 Action::New => self.new_doc(),
                 Action::Open => {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Documents", &[FILE_EXT, "gdoc", "docx", "pdf", "md", "rtf", "txt"])
+                        .add_filter("Documents", &[FILE_EXT, "gdoc", "docx", "odt", "pdf", "md", "rtf", "txt"])
+                        .add_filter("OpenDocument Text", &["odt"])
                         .add_filter("PDF documents", &["pdf"])
                         .add_filter("Google Docs", &["gdoc"])
                         .add_filter("All files", &["*"])
@@ -1204,6 +1221,7 @@ impl App {
                 Action::ExportRtf => self.export("rtf"),
                 Action::ExportTxt => self.export("txt"),
                 Action::ExportDocx => self.export("docx"),
+                Action::ExportOdt => self.export("odt"),
                 Action::ExportGdoc => self.export("gdoc"),
                 Action::ExportMd => self.export("md"),
                 Action::ExportHtml => self.export("html"),
@@ -1313,6 +1331,10 @@ impl App {
                 Action::Dialog(d) => {
                     if matches!(d, Dialog::PageSetup) {
                         self.right_panel = RightPanel::PageSetup;
+                        continue;
+                    }
+                    if matches!(d, Dialog::Prefs) {
+                        self.right_panel = RightPanel::Settings;
                         continue;
                     }
                     if let Dialog::Find(replace) = &d {
@@ -2573,6 +2595,17 @@ impl eframe::App for App {
                             self.page_setup_pane(ui, &th, now);
                         });
                 }
+                RightPanel::Settings => {
+                    egui::Panel::right("settings-panel")
+                        .resizable(true)
+                        .default_size(340.0)
+                        .min_size(280.0)
+                        .max_size(460.0)
+                        .frame(Frame::new().fill(th.chrome).inner_margin(Margin::symmetric(12, 10)).stroke(Stroke::new(1.0, th.border)))
+                        .show(ui, |ui| {
+                            self.settings_pane(ui, &th);
+                        });
+                }
                 RightPanel::None => {}
             }
         }
@@ -3623,6 +3656,7 @@ mod tests {
             table_panel_collapsed: false,
             pdf_panel_collapsed: false,
             update: UpdateState::default(),
+            assoc_status_msg: None,
         };
 
         // Simulate fullscreen -> windowed -> narrow window resize sequence

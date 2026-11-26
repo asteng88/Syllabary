@@ -3,12 +3,13 @@
 # to choose which extensions to associate with Syllabary.
 param(
     [string]$ExePath = (Resolve-Path "$PSScriptRoot\..\..\target\release\syllabary.exe").Path,
-    [string[]]$Extensions = @("wpx", "docx", "pdf", "gdoc", "md", "rtf", "txt")
+    [string[]]$Extensions = @("wpx", "docx", "odt", "pdf", "gdoc", "md", "rtf", "txt")
 )
 
 $map = @{
     "wpx"  = @{ ProgId = "Syllabary.Document.wpx";  Desc = "Syllabary Document";       IconIdx = 1 }
     "docx" = @{ ProgId = "Syllabary.Document.docx"; Desc = "Word Document (Syllabary)"; IconIdx = 2 }
+    "odt"  = @{ ProgId = "Syllabary.Document.odt";  Desc = "OpenDocument Text (Syllabary)"; IconIdx = 1 }
     "pdf"  = @{ ProgId = "Syllabary.Document.pdf";  Desc = "PDF Document (Syllabary)";  IconIdx = 3 }
     "gdoc" = @{ ProgId = "Syllabary.Document.gdoc"; Desc = "Google Doc (Syllabary)";    IconIdx = 4 }
     "md"   = @{ ProgId = "Syllabary.Document.md";   Desc = "Markdown Document (Syllabary)"; IconIdx = 5 }

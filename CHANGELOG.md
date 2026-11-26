@@ -2,6 +2,19 @@
 
 All notable changes to **Syllabary** are documented in this file.
 
+## [0.2.4] - 2026-11-25
+
+### Added
+- **OpenDocument Text (`.odt`) Full Import, Edit & Export Support:**
+  - Added a pure-Rust ODF 1.2 (ISO/IEC 26300) `.odt` reader and writer (`odt.rs`) supporting document metadata (`meta.xml`), page dimensions, margins, named styles, headers/footers (`styles.xml`), headings, paragraphs, character formatting, hyperlinks, bulleted & numbered lists, tables, and embedded images (`content.xml` + `Pictures/`).
+  - Integrated `.odt` across **Open**, **Save / Save As**, **File → Download → OpenDocument Text (.odt)**, the Command Palette, and Windows file associations.
+- **Settings Side Panel & One-Click Default App Registration:**
+  - Moved **Settings / Preferences** (`Tools → Settings / Preferences…`) out of a modal dialog into a docked, scrollable right-hand studio side panel (`RightPanel::Settings`).
+  - Added a **Default App & File Associations** section (`file_assoc.rs`) with per-extension checkboxes (`.wpx`, `.docx`, `.odt`, `.pdf`, `.gdoc`, `.md`, `.rtf`, `.txt`), **Select All / Clear**, live **Default** status badges, and a **"Set Syllabary as Default App"** button that registers per-user (`HKCU`, no admin required) ProgIDs, icons, `Capabilities`, and `RegisteredApplications`, then refreshes Explorer via `SHChangeNotify`.
+  - Added an **"Open Windows Default Apps…"** shortcut (`ms-settings:defaultapps`) and automatic detection of Windows `UserChoice`-protected extensions (such as `.pdf` or `.docx`).
+
+---
+
 ## [0.2.3] - 2026-11-25
 
 ### Added

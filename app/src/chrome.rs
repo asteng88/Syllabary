@@ -483,6 +483,7 @@ impl App {
                         ("Microsoft Word (.docx)", ""),
                         ("PDF Document (.pdf)", ""),
                         ("Rich Text Format (.rtf)", ""),
+                        ("OpenDocument Text (.odt)", ""),
                         ("Plain Text (.txt)", ""),
                         ("Markdown (.md)", ""),
                         ("Web Page (.html)", ""),
@@ -493,6 +494,9 @@ impl App {
                 }
                 if mitem(ui, th, Icon::New, "Microsoft Word (.docx)", "") {
                     self.act(Action::ExportDocx);
+                }
+                if mitem(ui, th, Icon::New, "OpenDocument Text (.odt)", "") {
+                    self.act(Action::ExportOdt);
                 }
                 if mitem(ui, th, Icon::Pdf, "PDF Document (.pdf)", "") {
                     self.act(Action::ExportPdf);
@@ -1360,7 +1364,7 @@ impl App {
                 self.act(Action::Dialog(Dialog::Dictionary));
             }
             ui.separator();
-            if mitem(ui, th, Icon::PageSetup, "Preferences…", "") {
+            if mitem(ui, th, Icon::Preferences, "Settings / Preferences…", "") {
                 self.act(Action::Dialog(Dialog::Prefs));
             }
             if mitem(ui, th, Icon::EditMode, "Substitutions (SmartCorrect)…", "") {
@@ -2651,6 +2655,238 @@ impl App {
             t.doc.page = pg;
             t.doc.pageless = pageless;
             t.changed();
+        }
+    }
+
+    /// Right-hand studio side panel for application Settings / Preferences and Default App file associations.
+    pub fn settings_pane(&mut self, ui: &mut egui::Ui, th: &Theme) {
+        let mr = self.mr_palette();
+        if modernrust::side_panel_header(ui, &mr, "Settings", Some("Preferences")) {
+            self.right_panel = crate::app::RightPanel::None;
+        }
+        ui.add_space(4.0);
+
+        let mut cfg = self.cfg.clone();
+        let mut apply_assoc = false;
+        let mut open_os_defaults = false;
+        let status_msg = self.assoc_status_msg.clone();
+
+        egui::ScrollArea::vertical().id_salt("settings-panel-scroll").show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+
+            // ── DEFAULT APP & FILE ASSOCIATIONS ──────────────────────────
+            ui.label(RichText::new("DEFAULT APP & FILE ASSOCIATIONS").size(11.0).color(th.accent).strong());
+            ui.label(
+                RichText::new("Check the file extensions you want Syllabary to open by default, then click Set as Default App.")
+                    .size(11.5)
+                    .color(th.subtle),
+            );
+
+            ui.horizontal(|ui| {
+                if ui.small_button("Select All").clicked() {
+                    cfg.assoc_extensions = crate::file_assoc::default_selected_extensions();
+                }
+                if ui.small_button("Clear").clicked() {
+                    cfg.assoc_extensions.clear();
+                }
+                let sel_count = crate::file_assoc::normalize_selected_extensions(&cfg.assoc_extensions).len();
+                let total = crate::file_assoc::SUPPORTED_EXTENSIONS.len();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{sel_count} of {total} checked")).size(11.0).weak());
+                });
+            });
+
+            egui::Frame::new()
+                .fill(th.surface_subtle)
+                .stroke(Stroke::new(1.0, th.border.gamma_multiply(0.75)))
+                .corner_radius(6.0)
+                .inner_margin(Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for spec in crate::file_assoc::SUPPORTED_EXTENSIONS {
+                        let mut checked = cfg
+                            .assoc_extensions
+                            .iter()
+                            .any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(spec.ext));
+                        let is_def = crate::file_assoc::is_registered_default(spec.ext);
+                        ui.horizontal(|ui| {
+                            let label = format!(".{} — {}", spec.ext, spec.label);
+                            if ui.checkbox(&mut checked, label).changed() {
+                                if checked {
+                                    if !cfg
+                                        .assoc_extensions
+                                        .iter()
+                                        .any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(spec.ext))
+                                    {
+                                        cfg.assoc_extensions.push(spec.ext.to_string());
+                                    }
+                                } else {
+                                    cfg.assoc_extensions
+                                        .retain(|e| !e.trim_start_matches('.').eq_ignore_ascii_case(spec.ext));
+                                }
+                            }
+                            if is_def {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new("Default")
+                                            .size(10.5)
+                                            .strong()
+                                            .color(Color32::from_rgb(25, 135, 84)),
+                                    );
+                                });
+                            }
+                        });
+                    }
+                });
+
+            let sel_count = crate::file_assoc::normalize_selected_extensions(&cfg.assoc_extensions).len();
+            let btn_label = if sel_count == 0 {
+                "Set Syllabary as Default App".to_string()
+            } else {
+                format!("Set Syllabary as Default App ({sel_count})")
+            };
+            ui.horizontal_wrapped(|ui| {
+                let primary_btn = egui::Button::new(
+                    RichText::new(&btn_label)
+                        .strong()
+                        .color(if sel_count > 0 { Color32::WHITE } else { th.subtle }),
+                )
+                .fill(if sel_count > 0 { th.accent } else { th.surface_subtle })
+                .corner_radius(6.0);
+                if ui.add_enabled(sel_count > 0, primary_btn).clicked() {
+                    apply_assoc = true;
+                }
+                #[cfg(windows)]
+                if ui
+                    .button("Open Windows Default Apps…")
+                    .on_hover_text("Open Windows Settings → Default Apps to confirm protected extensions like .pdf or .docx")
+                    .clicked()
+                {
+                    open_os_defaults = true;
+                }
+            });
+
+            if let Some((ok, msg)) = &status_msg {
+                let accent = if *ok {
+                    Color32::from_rgb(25, 135, 84)
+                } else {
+                    Color32::from_rgb(196, 43, 28)
+                };
+                egui::Frame::new()
+                    .fill(accent.gamma_multiply(0.12))
+                    .stroke(Stroke::new(1.0, accent.gamma_multiply(0.6)))
+                    .corner_radius(6.0)
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(msg).size(11.5).color(accent));
+                    });
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── GENERAL ──────────────────────────────────────────────────
+            ui.label(RichText::new("GENERAL").size(11.0).color(th.accent).strong());
+            ui.checkbox(&mut cfg.smart_quotes, "Use smart quotes (“ ”)");
+            ui.checkbox(&mut cfg.auto_links, "Automatically detect links");
+            ui.checkbox(&mut cfg.markdown_auto, "Automatically detect Markdown (# headings, * lists, [] checklists, ---)");
+            ui.checkbox(&mut cfg.smartcorrect, "Automatically correct spelling and substitutions");
+            ui.checkbox(&mut cfg.live_word_count, "Display word count while typing");
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("SHORTCUT KEYS").size(11.0).color(th.accent).strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Preset:");
+                for p in ShortcutPreset::ALL {
+                    ui.selectable_value(&mut cfg.shortcut_preset, p, p.label());
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("VIEW & APPEARANCE").size(11.0).color(th.accent).strong());
+            ui.checkbox(&mut cfg.dark, "Dark theme");
+            ui.checkbox(&mut cfg.margin_guides, "Show margin guides on the page");
+            ui.horizontal(|ui| {
+                ui.label("Cursor:");
+                ui.selectable_value(&mut cfg.block_cursor, false, "Line cursor");
+                ui.selectable_value(&mut cfg.block_cursor, true, "Block cursor");
+            });
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("TIMED SAVE").size(11.0).color(th.accent).strong());
+            ui.horizontal(|ui| {
+                ui.label("Keep a recovery copy every");
+                ui.add(egui::DragValue::new(&mut cfg.autosave_min).range(0..=120));
+                ui.label("min (0 = off)");
+            });
+            ui.label(RichText::new("Recovery copies stay on this computer only.").size(11.0).weak());
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("PRIVACY").size(11.0).color(th.accent).strong());
+            ui.label(
+                RichText::new("Syllabary works 100% offline: it never connects to the internet.")
+                    .size(11.5)
+                    .weak(),
+            );
+        });
+
+        if cfg.dark != self.cfg.dark {
+            self.act(Action::ToggleDark);
+            cfg.dark = self.cfg.dark;
+        }
+        let changed = cfg.margin_guides != self.cfg.margin_guides
+            || cfg.block_cursor != self.cfg.block_cursor
+            || cfg.smartcorrect != self.cfg.smartcorrect
+            || cfg.smart_quotes != self.cfg.smart_quotes
+            || cfg.markdown_auto != self.cfg.markdown_auto
+            || cfg.auto_links != self.cfg.auto_links
+            || cfg.live_word_count != self.cfg.live_word_count
+            || cfg.autosave_min != self.cfg.autosave_min
+            || cfg.shortcut_preset != self.cfg.shortcut_preset
+            || cfg.assoc_extensions != self.cfg.assoc_extensions;
+        if changed {
+            self.cfg.margin_guides = cfg.margin_guides;
+            self.cfg.block_cursor = cfg.block_cursor;
+            self.cfg.smartcorrect = cfg.smartcorrect;
+            self.cfg.smart_quotes = cfg.smart_quotes;
+            self.cfg.markdown_auto = cfg.markdown_auto;
+            self.cfg.auto_links = cfg.auto_links;
+            self.cfg.live_word_count = cfg.live_word_count;
+            self.cfg.autosave_min = cfg.autosave_min;
+            self.cfg.shortcut_preset = cfg.shortcut_preset;
+            self.cfg.assoc_extensions = cfg.assoc_extensions;
+            self.save_config();
+        }
+        if apply_assoc {
+            match crate::file_assoc::apply_default_associations(&self.cfg.assoc_extensions) {
+                Ok(res) => {
+                    let msg = if res.protected_by_windows.is_empty() {
+                        format!(
+                            "Syllabary is now registered as the default app for {} extension(s).",
+                            res.registered.len()
+                        )
+                    } else {
+                        let locked = res.protected_by_windows.join(", ");
+                        format!(
+                            "Registered {} extension(s). Windows locks {locked} via UserChoice — click \"Open Windows Default Apps…\" to confirm them.",
+                            res.registered.len()
+                        )
+                    };
+                    self.assoc_status_msg = Some((true, msg.clone()));
+                    self.toast(msg);
+                }
+                Err(err) => {
+                    self.assoc_status_msg = Some((false, err.clone()));
+                    self.toast(err);
+                }
+            }
+        }
+        if open_os_defaults {
+            if let Err(err) = crate::file_assoc::open_system_default_apps() {
+                self.assoc_status_msg = Some((false, err.clone()));
+                self.toast(err);
+            }
         }
     }
 }
