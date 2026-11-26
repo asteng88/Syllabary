@@ -22,7 +22,7 @@
 
 **Syllabary** is a modern, native desktop word processor crafted for writers, engineers, and everyday document workflows who want the polish of a contemporary studio editor **without** cloud lock-in, subscriptions, Electron bloat, or telemetry.
 
-Written from the ground up in **Rust** (`eframe` / `egui`), Syllabary launches in milliseconds, renders crisp typography with **17 bundled open-source fonts**, edits `.docx`, `.odt`, `.pdf`, `.md`, `.rtf`, `.gdoc`, `.txt`, and native `.wpx` files directly on your machine, and ships with a dedicated cross-platform GUI installer for **Windows** and **Linux (including Fedora)**.
+Written from the ground up in **Rust** (`eframe` / `egui`), Syllabary launches in milliseconds, renders crisp typography with **17 bundled open-source fonts**, edits `.docx`, `.odt`, `.pdf`, `.md`, `.rtf`, `.gdoc`, `.txt`, and native `.wpx` files directly on your machine, and ships with a dedicated cross-platform GUI installer for **Windows** and **Linux**.
 
 ---
 
