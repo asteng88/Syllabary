@@ -397,23 +397,36 @@ impl Tab {
         if let Some(dims) = crate::pdf::hayro_pdf_info(arc.clone()) {
             if !dims.is_empty() {
                 let blocks = crate::pdf_import::extract_editable_blocks(&arc).unwrap_or_default();
-                let next_block_id = blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
-                self.pdf_view = Some(PdfExactView {
-                    bytes: arc,
-                    page_dims_pt: dims,
-                    mode: PdfMode::Read,
-                    blocks,
-                    selected_block: None,
-                    adding_text_box: false,
-                    undo: Vec::new(),
-                    redo: Vec::new(),
-                    next_block_id,
-                    editing_checkpointed: None,
-                    drag: PdfBlockDrag::None,
-                    textures: std::collections::HashMap::new(),
-                });
+                self.attach_prepared_pdf_view(arc, dims, blocks);
             }
         }
+    }
+
+    /// Attaches a pre-parsed PDF view computed on a background thread without blocking the UI.
+    pub fn attach_prepared_pdf_view(
+        &mut self,
+        bytes: std::sync::Arc<Vec<u8>>,
+        page_dims_pt: Vec<(f32, f32)>,
+        blocks: Vec<crate::pdf_import::PdfTextBlock>,
+    ) {
+        if page_dims_pt.is_empty() {
+            return;
+        }
+        let next_block_id = blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
+        self.pdf_view = Some(PdfExactView {
+            bytes,
+            page_dims_pt,
+            mode: PdfMode::Read,
+            blocks,
+            selected_block: None,
+            adding_text_box: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            next_block_id,
+            editing_checkpointed: None,
+            drag: PdfBlockDrag::None,
+            textures: std::collections::HashMap::new(),
+        });
     }
 
     pub fn pdf_mode(&self) -> Option<PdfMode> {

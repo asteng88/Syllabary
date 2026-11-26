@@ -2,6 +2,15 @@
 
 All notable changes to **Syllabary** are documented in this file.
 
+## [0.2.6] - 2026-11-26
+
+### Added
+- **Non-Blocking Background Document Loading & Live Progress Bar:**
+  - Moved document reading, parsing, PDF page interpretation, `hayro` page setup, and editable PDF text block extraction onto a background worker thread (`open_path_async` / `poll_doc_load` in `app.rs`, `read_with_progress` / `extract_editable_blocks_with_progress` in `pdf_import.rs`, `attach_prepared_pdf_view` in `editor.rs`).
+  - Added a centered, theme-aware loading progress card with a spinner, filename, animated percentage progress bar, live per-page status readout, and elapsed timer so large documents (especially multi-page PDFs) no longer freeze the window or trigger OS `(Not Responding)` warnings.
+
+---
+
 ## [0.2.5] - 2026-11-26
 
 ### Added

@@ -3132,6 +3132,14 @@ pub struct PdfTextBlock {
 /// Extracts positioned, editable text blocks from raw PDF bytes for in-place editing
 /// directly over the exact `hayro` page rendering.
 pub fn extract_editable_blocks(data: &[u8]) -> Result<Vec<PdfTextBlock>, String> {
+    extract_editable_blocks_with_progress(data, &mut |_, _| {})
+}
+
+/// Same as `extract_editable_blocks`, reporting incremental progress `(0.0..=1.0, status)` per page.
+pub fn extract_editable_blocks_with_progress(
+    data: &[u8],
+    on_progress: &mut dyn FnMut(f32, &str),
+) -> Result<Vec<PdfTextBlock>, String> {
     let pdf = PdfDoc::open(data)?;
     let root_obj = pdf
         .trailer
@@ -3159,11 +3167,17 @@ pub fn extract_editable_blocks(data: &[u8]) -> Result<Vec<PdfTextBlock>, String>
         }
     }
 
+    let total_pages = pages.len().max(1);
     let mut all_spans = Vec::new();
     let mut all_images = Vec::new();
     let mut page_bg = None;
     let mut page_geoms = Vec::with_capacity(pages.len());
     for (idx, p) in pages.iter().enumerate() {
+        let frac = (idx as f32) / (total_pages as f32);
+        on_progress(
+            frac,
+            &format!("Extracting editable text (page {} of {})…", idx + 1, total_pages),
+        );
         page_geoms.push(interpret_page(
             &pdf,
             idx,
@@ -3299,6 +3313,15 @@ pub fn extract_editable_blocks(data: &[u8]) -> Result<Vec<PdfTextBlock>, String>
 
 /// Parses raw PDF bytes into an editable Syllabary `Document`.
 pub fn read(data: &[u8]) -> Result<Document, String> {
+    read_with_progress(data, &mut |_, _| {})
+}
+
+/// Parses raw PDF bytes into an editable Syllabary `Document`, reporting progress `(0.0..=1.0, status)`.
+pub fn read_with_progress(
+    data: &[u8],
+    on_progress: &mut dyn FnMut(f32, &str),
+) -> Result<Document, String> {
+    on_progress(0.05, "Parsing PDF structure…");
     let pdf = PdfDoc::open(data)?;
     let root_obj = pdf
         .trailer
@@ -3347,11 +3370,17 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
         ..PageSetup::default()
     };
 
+    let total_pages = pages.len().max(1);
     let mut all_spans = Vec::new();
     let mut all_images = Vec::new();
     let mut page_bg = None;
     let mut page_geoms = Vec::with_capacity(pages.len());
     for (idx, p) in pages.iter().enumerate() {
+        let frac = 0.10 + 0.75 * (idx as f32 / total_pages as f32);
+        on_progress(
+            frac,
+            &format!("Reading PDF page {} of {}…", idx + 1, total_pages),
+        );
         page_geoms.push(interpret_page(
             &pdf,
             idx,
@@ -3362,6 +3391,7 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
             &mut page_bg,
         ));
     }
+    on_progress(0.90, "Reconstructing layout & paragraphs…");
     if let Some(bg) = page_bg {
         doc.page.background = bg;
     }

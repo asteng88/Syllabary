@@ -249,6 +249,30 @@ impl CloseFlow {
     }
 }
 
+/// Background document-loading result delivered back to the UI thread.
+pub struct LoadedDocument {
+    pub path: PathBuf,
+    pub ext: String,
+    pub doc: Document,
+    pub pdf_view: Option<(Arc<Vec<u8>>, Vec<(f32, f32)>, Vec<crate::pdf_import::PdfTextBlock>)>,
+}
+
+/// Progress or completion message sent by the background document loader thread.
+pub enum DocLoadMsg {
+    Progress { frac: f32, status: String },
+    Done(Result<LoadedDocument, String>),
+}
+
+/// Live state of an in-progress background document load so the UI stays 100% responsive.
+pub struct DocLoadJob {
+    pub file_name: String,
+    pub progress: f32,
+    pub status: String,
+    pub started_at: std::time::Instant,
+    pub show_immediately: bool,
+    pub rx: std::sync::mpsc::Receiver<DocLoadMsg>,
+}
+
 /// Explicit mutually-exclusive right-hand studio inspector drawer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RightPanel {
@@ -318,6 +342,8 @@ pub struct App {
     pub pdf_panel_collapsed: bool,
     pub update: UpdateState,
     pub assoc_status_msg: Option<(bool, String)>,
+    pub doc_load: Option<DocLoadJob>,
+    pub doc_load_queue: Vec<PathBuf>,
 }
 
 impl App {
@@ -381,6 +407,8 @@ impl App {
             pdf_panel_collapsed: false,
             update: UpdateState::default(),
             assoc_status_msg: None,
+            doc_load: None,
+            doc_load_queue: Vec::new(),
         };
         crate::updater::cleanup_old_executable_backup();
         if app.screenshot.is_none()
@@ -389,8 +417,14 @@ impl App {
             app.start_update_check(false);
         }
         app.rebuild_sc_table();
-        for p in open {
-            app.open_path(&p);
+        if app.screenshot.is_some() {
+            for p in open {
+                app.open_path(&p);
+            }
+        } else {
+            for p in open {
+                app.open_path_async(&p);
+            }
         }
         if app.tabs.is_empty() {
             app.new_doc();
@@ -587,6 +621,296 @@ impl App {
         self.tabs.push(t);
         self.active = self.tabs.len() - 1;
         self.add_recent(path);
+    }
+
+    /// Opens a document on a background thread with live progress reporting so large files
+    /// (especially multi-page PDFs) never freeze the UI or trigger OS "(Not Responding)" warnings.
+    pub fn open_path_async(&mut self, path: &Path) {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if ext == "doc" {
+            self.toast("Old Word (.doc) files aren't supported. Save it as .docx or Rich Text first.".into());
+            return;
+        }
+        if matches!(ext.as_str(), "lwp" | "sam" | "mwp") {
+            self.toast("Files from the 1999 program use a closed format. Save them as Rich Text (RTF) there first.".into());
+            return;
+        }
+
+        if self.doc_load.is_some() {
+            self.doc_load_queue.push(path.to_path_buf());
+            return;
+        }
+
+        let file_name = path
+            .file_name()
+            .map_or_else(|| "Document".into(), |n| n.to_string_lossy().to_string());
+        let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let show_immediately = ext == "pdf" || file_len >= 256 * 1024;
+        let initial_status = if file_len >= 1024 * 1024 {
+            format!("Reading {file_name} ({:.1} MB)…", file_len as f64 / 1_048_576.0)
+        } else {
+            format!("Reading {file_name}…")
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel::<DocLoadMsg>();
+        let ctx = self.egui_ctx.clone();
+        let path_buf = path.to_path_buf();
+        let ext_clone = ext.clone();
+        let status_for_thread = initial_status.clone();
+
+        std::thread::spawn(move || {
+            let send_prog = |frac: f32, msg: &str| {
+                let _ = tx.send(DocLoadMsg::Progress {
+                    frac: frac.clamp(0.0, 1.0),
+                    status: msg.to_string(),
+                });
+                ctx.request_repaint();
+            };
+
+            send_prog(0.03, &status_for_thread);
+
+            let res = (|| -> Result<LoadedDocument, String> {
+                let bytes = std::fs::read(&path_buf)
+                    .map_err(|e| format!("Couldn't open {}: {e}", path_buf.display()))?;
+
+                let (doc, pdf_view) = match ext_clone.as_str() {
+                    "pdf" => {
+                        let doc = crate::pdf_import::read_with_progress(&bytes, &mut |f, s| {
+                            // First pass maps 0.05..0.58 of total bar
+                            send_prog(0.05 + f * 0.53, s);
+                        })
+                        .map_err(|e| format!("Couldn't read that PDF file: {e}"))?;
+
+                        let arc = Arc::new(bytes);
+                        send_prog(0.60, "Preparing PDF page renderer…");
+                        let pdf_view = if let Some(dims) = crate::pdf::hayro_pdf_info(arc.clone()) {
+                            if !dims.is_empty() {
+                                let blocks = crate::pdf_import::extract_editable_blocks_with_progress(
+                                    &arc,
+                                    &mut |f, s| {
+                                        // Second pass maps 0.62..0.96 of total bar
+                                        send_prog(0.62 + f * 0.34, s);
+                                    },
+                                )
+                                .unwrap_or_default();
+                                Some((arc, dims, blocks))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        (doc, pdf_view)
+                    }
+                    "docx" => {
+                        send_prog(0.30, "Parsing Word document (.docx)…");
+                        let doc = crate::docx::read(&bytes)
+                            .map_err(|e| format!("Couldn't read that Word file: {e}"))?;
+                        (doc, None)
+                    }
+                    "odt" => {
+                        send_prog(0.30, "Parsing OpenDocument (.odt)…");
+                        let doc = crate::odt::read(&bytes)
+                            .map_err(|e| format!("Couldn't read that OpenDocument file: {e}"))?;
+                        (doc, None)
+                    }
+                    "wpx" => {
+                        send_prog(0.35, "Parsing Syllabary document…");
+                        let text = doc::decode_text(&bytes);
+                        let doc = doc::from_json(&text)
+                            .map_err(|e| format!("That file isn't a readable document ({e})."))?;
+                        (doc, None)
+                    }
+                    "gdoc" => {
+                        send_prog(0.35, "Parsing Google Docs file…");
+                        let text = doc::decode_text(&bytes);
+                        let doc = doc::from_gdoc(&text)
+                            .map_err(|e| format!("Couldn't read that Google Docs file: {e}"))?;
+                        (doc, None)
+                    }
+                    "rtf" => {
+                        send_prog(0.35, "Parsing Rich Text document…");
+                        let raw: String = bytes.iter().map(|&b| b as char).collect();
+                        (doc::from_rtf(&raw), None)
+                    }
+                    "md" | "markdown" => {
+                        send_prog(0.35, "Parsing Markdown document…");
+                        let text = doc::decode_text(&bytes);
+                        (doc::from_markdown(&text), None)
+                    }
+                    _ => {
+                        send_prog(0.35, "Decoding text document…");
+                        let text = doc::decode_text(&bytes);
+                        (doc::from_plain(&text), None)
+                    }
+                };
+
+                send_prog(0.98, "Opening document…");
+                Ok(LoadedDocument {
+                    path: path_buf,
+                    ext: ext_clone,
+                    doc,
+                    pdf_view,
+                })
+            })();
+
+            let _ = tx.send(DocLoadMsg::Done(res));
+            ctx.request_repaint();
+        });
+
+        self.doc_load = Some(DocLoadJob {
+            file_name,
+            progress: 0.03,
+            status: initial_status,
+            started_at: std::time::Instant::now(),
+            show_immediately,
+            rx,
+        });
+        self.egui_ctx.request_repaint();
+    }
+
+    /// Polls the background document loader each frame and opens the tab once ready.
+    fn poll_doc_load(&mut self, ctx: &egui::Context) {
+        let mut finished: Option<Result<LoadedDocument, String>> = None;
+        if let Some(job) = self.doc_load.as_mut() {
+            while let Ok(msg) = job.rx.try_recv() {
+                match msg {
+                    DocLoadMsg::Progress { frac, status } => {
+                        job.progress = frac;
+                        job.status = status;
+                    }
+                    DocLoadMsg::Done(res) => {
+                        finished = Some(res);
+                        break;
+                    }
+                }
+            }
+            if finished.is_none() {
+                // Keep repainting smoothly so the spinner & progress bar animate
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
+        }
+
+        if let Some(res) = finished {
+            self.doc_load = None;
+            match res {
+                Ok(loaded) => {
+                    if self.tabs.len() == 1
+                        && !self.tabs[0].dirty
+                        && self.tabs[0].path.is_none()
+                        && self.tabs[0].doc.plain_text().is_empty()
+                    {
+                        self.tabs.clear();
+                    }
+                    let mut t = Tab::new(
+                        self.next_id,
+                        loaded
+                            .path
+                            .file_name()
+                            .map_or_else(|| "Document".into(), |n| n.to_string_lossy().to_string()),
+                        loaded.doc,
+                    );
+                    if let Some((bytes, dims, blocks)) = loaded.pdf_view {
+                        t.attach_prepared_pdf_view(bytes, dims, blocks);
+                    }
+                    self.next_id += 1;
+                    if matches!(
+                        loaded.ext.as_str(),
+                        "wpx" | "gdoc" | "rtf" | "txt" | "docx" | "odt" | "md" | "markdown" | "pdf"
+                    ) {
+                        t.path = Some(loaded.path.clone());
+                    }
+                    self.tabs.push(t);
+                    self.active = self.tabs.len() - 1;
+                    self.add_recent(&loaded.path);
+                }
+                Err(err) => {
+                    self.toast(err);
+                }
+            }
+            if !self.doc_load_queue.is_empty() {
+                let next = self.doc_load_queue.remove(0);
+                self.open_path_async(&next);
+            }
+        }
+    }
+
+    /// Renders a sleek, non-blocking progress card while a large document loads in the background.
+    fn draw_doc_loading_overlay(&self, ctx: &egui::Context, th: &Theme) {
+        let Some(job) = &self.doc_load else { return };
+        if !job.show_immediately && job.started_at.elapsed().as_millis() < 120 {
+            return;
+        }
+
+        let screen = ctx.content_rect();
+        // Subtle translucent backdrop scrim
+        egui::Area::new(egui::Id::unique("doc-loading-scrim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (_, _) = ui.allocate_exact_size(screen.size(), Sense::click());
+                let scrim = if th.dark {
+                    Color32::from_black_alpha(115)
+                } else {
+                    Color32::from_black_alpha(55)
+                };
+                ui.painter().rect_filled(screen, 0.0, scrim);
+            });
+
+        // Centered progress card
+        egui::Area::new(egui::Id::unique("doc-loading-card"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(th.chrome)
+                    .stroke(Stroke::new(1.0, th.border))
+                    .corner_radius(egui::CornerRadius::same(14))
+                    .inner_margin(Margin::symmetric(24, 20))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 24,
+                        spread: 0,
+                        color: Color32::from_black_alpha(if th.dark { 140 } else { 45 }),
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(380.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(format!("Opening {}", job.file_name))
+                                    .size(15.0)
+                                    .strong()
+                                    .color(th.text),
+                            );
+                        });
+                        ui.add_space(12.0);
+                        ui.add(
+                            egui::ProgressBar::new(job.progress)
+                                .desired_height(12.0)
+                                .show_percentage()
+                                .animate(true),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&job.status).size(12.0).color(th.subtle));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let secs = job.started_at.elapsed().as_secs();
+                                if secs >= 2 {
+                                    ui.label(
+                                        RichText::new(format!("{secs}s"))
+                                            .size(11.5)
+                                            .color(th.subtle),
+                                    );
+                                }
+                            });
+                        });
+                    });
+            });
     }
 
     pub fn open_recovered(&mut self, path: &Path) {
@@ -1195,10 +1519,10 @@ impl App {
                         .add_filter("All files", &["*"])
                         .pick_file()
                     {
-                        self.open_path(&p);
+                        self.open_path_async(&p);
                     }
                 }
-                Action::OpenPath(p) => self.open_path(&p),
+                Action::OpenPath(p) => self.open_path_async(&p),
                 Action::Save => {
                     let i = self.active;
                     self.save(i, false);
@@ -2429,6 +2753,7 @@ impl eframe::App for App {
         self.frame += 1;
         let now = ctx.input(|i| i.time);
         self.poll_updater(&ctx);
+        self.poll_doc_load(&ctx);
 
         // screenshot mode: draw ~120 frames, save the picture, exit
         if let Some(path) = self.screenshot.clone() {
@@ -2475,7 +2800,7 @@ impl eframe::App for App {
                 if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "ico" | "tga") {
                     self.insert_image_from_path(p, now);
                 } else {
-                    self.open_path(p);
+                    self.open_path_async(p);
                 }
             }
         }
@@ -3580,6 +3905,7 @@ impl eframe::App for App {
         self.handle_cmds(cmds);
 
         dialogs::show(self, &ctx);
+        self.draw_doc_loading_overlay(&ctx, &th);
 
         let mr_pal = self.mr_palette();
         self.toasts.show(&ctx, &mr_pal);
@@ -3657,6 +3983,8 @@ mod tests {
             pdf_panel_collapsed: false,
             update: UpdateState::default(),
             assoc_status_msg: None,
+            doc_load: None,
+            doc_load_queue: Vec::new(),
         };
 
         // Simulate fullscreen -> windowed -> narrow window resize sequence
