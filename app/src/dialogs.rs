@@ -623,7 +623,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     ui.label("Created by");
                     ui.strong("asteng88");
                     ui.label("—");
-                    ui.hyperlink_to("studio88retro.com", "https://studio88retro.com");
+                    ui.hyperlink_to("station88retro.com", "https://station88retro.com");
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {

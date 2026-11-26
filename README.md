@@ -169,6 +169,6 @@ Released under the **[MIT License](LICENSE)**.
 
 <div align="center">
 
-Crafted with care by **[asteng88](https://github.com/asteng88)** — **[studio88retro.com](https://studio88retro.com)**
+Crafted with care by **[asteng88](https://github.com/asteng88)** — **[station88retro.com](https://station88retro.com)**
 
 </div>

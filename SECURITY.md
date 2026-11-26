@@ -18,4 +18,4 @@ Syllabary is designed to run **100% offline**:
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability (such as a parser crash, unsafe file handling, or updater integrity issue), please **do not** open a public issue. Instead, report it privately via [GitHub Security Advisories](https://github.com/asteng88/Syllabary/security/advisories/new) or contact **asteng88** via [studio88retro.com](https://studio88retro.com).
+If you discover a security vulnerability (such as a parser crash, unsafe file handling, or updater integrity issue), please **do not** open a public issue. Instead, report it privately via [GitHub Security Advisories](https://github.com/asteng88/Syllabary/security/advisories/new) or contact **asteng88** via [station88retro.com](https://station88retro.com).

@@ -2,7 +2,7 @@
 //!
 //! Renders an obsidian editorial studio card with animated amber-to-magenta aurora glows,
 //! fine typographic registration marks, sweeping glass sheen, the Syllabary emblem,
-//! live startup progress bar, and author signature (`asteng88 - studio88retro.com`).
+//! live startup progress bar, and author signature (`asteng88 - station88retro.com`).
 
 use std::time::Instant;
 
@@ -388,7 +388,7 @@ impl SplashState {
                     Color32::from_rgba_unmultiplied(255, 245, 235, (235.0 * alpha) as u8),
                 );
 
-                // 9. Hairline footer divider & Author Signature (`asteng88 - studio88retro.com`)
+                // 9. Hairline footer divider & Author Signature (`asteng88 - station88retro.com`)
                 let div_y = rect.bottom() - 56.0;
                 card_p.line_segment(
                     [pos2(bar_left, div_y), pos2(bar_right, div_y)],
@@ -435,10 +435,10 @@ impl SplashState {
                     Color32::WHITE,
                 );
 
-                // Clickable studio88retro.com link
+                // Clickable station88retro.com link
                 let site_x = bar_left + prefix_w + author_w + sep_w;
                 let site_g = card_p.layout_no_wrap(
-                    "studio88retro.com".to_string(),
+                    "station88retro.com".to_string(),
                     FontId::proportional(13.0),
                     Color32::from_rgba_unmultiplied(251, 191, 36, (245.0 * alpha) as u8),
                 );
@@ -448,7 +448,7 @@ impl SplashState {
                 );
                 let site_resp = ui.interact(
                     site_rect,
-                    egui::Id::unique("splash-studio88-link"),
+                    egui::Id::unique("splash-station88-link"),
                     Sense::click(),
                 );
                 let site_col = if site_resp.hovered() {
@@ -460,7 +460,7 @@ impl SplashState {
                 card_p.text(
                     pos2(site_x, foot_y),
                     Align2::LEFT_CENTER,
-                    "studio88retro.com",
+                    "station88retro.com",
                     FontId::proportional(13.0),
                     site_col,
                 );
@@ -504,7 +504,7 @@ impl SplashState {
             });
 
         if open_website {
-            ctx.open_url(egui::OpenUrl::new_tab("https://studio88retro.com"));
+            ctx.open_url(egui::OpenUrl::new_tab("https://station88retro.com"));
         } else if click_dismiss && self.dismissed_at.is_none() {
             self.dismissed_at = Some(Instant::now());
         }

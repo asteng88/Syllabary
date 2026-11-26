@@ -6,9 +6,9 @@ All notable changes to **Syllabary** are documented in this file.
 
 ### Added
 - **Animated Studio Splash Screen (`splash.rs`):**
-  - Added a custom animated obsidian studio splash screen on startup featuring breathing amber/magenta/indigo aurora glows, typographic drafting grid & print registration marks, diagonal glass entrance sheen, glowing Syllabary emblem, amber-to-magenta animated progress bar, and author signature (`Created by asteng88 — studio88retro.com`, with clickable link).
+  - Added a custom animated obsidian studio splash screen on startup featuring breathing amber/magenta/indigo aurora glows, typographic drafting grid & print registration marks, diagonal glass entrance sheen, glowing Syllabary emblem, amber-to-magenta animated progress bar, and author signature (`Created by asteng88 — station88retro.com`, with clickable link).
   - Smoothly fades in and out automatically, or dismisses immediately on click / `Esc` / `Enter` / `Space`.
-  - Added author attribution (`asteng88 — studio88retro.com`) and a **"Show Splash Screen"** replay button to **Help → About Syllabary**.
+  - Added author attribution (`asteng88 — station88retro.com`) and a **"Show Splash Screen"** replay button to **Help → About Syllabary**.
 
 ---
 
