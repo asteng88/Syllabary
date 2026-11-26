@@ -22,6 +22,7 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed=assets/icons/{name}");
     }
+    #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let _ = embed_resource::compile("assets/icons/syllabary.rc", embed_resource::NONE);
     }

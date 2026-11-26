@@ -10,16 +10,45 @@ use std::sync::{Arc, OnceLock};
 
 use crate::doc::{bundled_folder, FontCat, DEFAULT_FONT, FONT_NAMES};
 
-/// The fonts/ folder shipped next to the program (or found above it while developing).
+/// The fonts/ folder shipped next to the program (or found above it while developing,
+/// or in standard Linux data directories for packaged installs).
 pub fn bundled_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let mut dir = exe.parent()?.to_path_buf();
-    for _ in 0..5 {
-        let f = dir.join("fonts");
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mut dir) = exe.parent().map(Path::to_path_buf) {
+            for _ in 0..5 {
+                let f = dir.join("fonts");
+                if f.join("README.md").exists() || f.join("lora").exists() {
+                    return Some(f);
+                }
+                let Some(parent) = dir.parent() else { break };
+                dir = parent.to_path_buf();
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(data_dir) = dirs::data_local_dir() {
+            let user_fonts = data_dir.join("syllabary").join("fonts");
+            if user_fonts.join("README.md").exists() || user_fonts.join("lora").exists() {
+                return Some(user_fonts);
+            }
+        }
+        for sys in ["/usr/share/syllabary/fonts", "/usr/local/share/syllabary/fonts"] {
+            let p = PathBuf::from(sys);
+            if p.join("README.md").exists() || p.join("lora").exists() {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let f = cwd.join("fonts");
         if f.join("README.md").exists() || f.join("lora").exists() {
             return Some(f);
         }
-        dir = dir.parent()?.to_path_buf();
+    }
+    let manifest_fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+    if manifest_fonts.join("README.md").exists() || manifest_fonts.join("lora").exists() {
+        return Some(manifest_fonts);
     }
     None
 }
@@ -200,11 +229,20 @@ fn font_dir() -> PathBuf {
 }
 
 fn system_font_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![font_dir()];
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let lp = Path::new(&local);
-        dirs.push(lp.join("Microsoft\\Windows\\Fonts"));
-        dirs.push(lp.join("Microsoft\\FontCache\\4\\CloudFonts"));
+    let mut dirs = Vec::new();
+    #[cfg(windows)]
+    {
+        dirs.push(font_dir());
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let lp = Path::new(&local);
+            dirs.push(lp.join("Microsoft\\Windows\\Fonts"));
+            dirs.push(lp.join("Microsoft\\FontCache\\4\\CloudFonts"));
+        }
+    }
+    if let Some(user_fonts) = dirs::font_dir() {
+        if user_fonts.exists() {
+            dirs.push(user_fonts);
+        }
     }
     for p in [
         "/System/Library/Fonts",
@@ -643,6 +681,24 @@ pub fn catalog() -> &'static [CatalogEntry] {
                         }
                     }
                 }
+                // On Linux/macOS where core Windows fonts are not installed, fall back to a
+                // metric-compatible bundled open-source font so PDF export and Word metrics work.
+                if files[0].is_none() {
+                    if let Some(bdir) = bundled.as_ref() {
+                        let fallback_folder = match base_font_category(fi as u16) {
+                            FontCat::Serif => "source-serif-4",
+                            FontCat::Mono => "jetbrains-mono",
+                            FontCat::Script => "caveat",
+                            FontCat::Sans => "inter",
+                        };
+                        for (v, fname) in ["regular.ttf", "bold.ttf", "italic.ttf", "bolditalic.ttf"].iter().enumerate() {
+                            let p = bdir.join(fallback_folder).join(fname);
+                            if p.exists() {
+                                files[v] = Some(p);
+                            }
+                        }
+                    }
+                }
             }
             entries.push(CatalogEntry {
                 name,
@@ -799,8 +855,13 @@ pub fn install(ctx: &egui::Context) -> FontBook {
         ("sym:linux-noto-emoji", "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf"),
         ("sym:linux-noto-color", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
         ("sym:linux-noto-emoji-2", "/usr/share/fonts/noto/NotoEmoji-Regular.ttf"),
+        ("sym:fedora-noto-color", "/usr/share/fonts/google-noto-emoji-color-fonts/NotoColorEmoji.ttf"),
+        ("sym:fedora-noto-color-2", "/usr/share/fonts/google-noto-color-emoji-fonts/NotoColorEmoji.ttf"),
+        ("sym:fedora-noto-emoji", "/usr/share/fonts/google-noto-emoji-fonts/NotoEmoji-Regular.ttf"),
         ("sym:linux-symbola", "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf"),
+        ("sym:fedora-symbola", "/usr/share/fonts/gdouros-symbola/Symbola.ttf"),
         ("sym:linux-dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ("sym:fedora-dejavu", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"),
     ] {
         if let Ok(bytes) = std::fs::read(abs_path) {
             defs.font_data.insert(key.into(), Arc::new(FontData::from_owned(strip_ebdt(bytes))));

@@ -1909,7 +1909,12 @@ fn spell_dialog(app: &mut App, ctx: &egui::Context, open: &mut bool, now: f64) {
     if !app.speller.available() {
         window("Spelling and grammar check").open(open).show(ctx, |ui| {
             ui.label("This computer has no English spelling dictionary installed.");
+            #[cfg(windows)]
             ui.label("Add one in Windows Settings › Time & language › Language.");
+            #[cfg(target_os = "linux")]
+            ui.label("Install a Hunspell dictionary (e.g. `sudo dnf install hunspell-en-US` on Fedora or `sudo apt install hunspell-en-us` on Ubuntu/Debian).");
+            #[cfg(not(any(windows, target_os = "linux")))]
+            ui.label("Install a system spelling dictionary for your language.");
         });
         return;
     }

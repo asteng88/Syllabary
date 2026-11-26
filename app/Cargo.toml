@@ -1,6 +1,6 @@
 [package]
 name = "syllabary"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 
 [[bin]]
@@ -23,6 +23,9 @@ krilla = "0.8"
 hayro = "0.9"
 ureq = "3"
 sha2 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+spellbook = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

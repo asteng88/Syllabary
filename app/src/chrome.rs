@@ -2668,6 +2668,7 @@ impl App {
 
         let mut cfg = self.cfg.clone();
         let mut apply_assoc = false;
+        #[cfg_attr(not(windows), expect(unused_mut, reason = "Windows-only Default Apps button sets this flag"))]
         let mut open_os_defaults = false;
         let status_msg = self.assoc_status_msg.clone();
 

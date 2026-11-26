@@ -368,8 +368,13 @@ pub fn replace_executable_in_place(new_exe_path: &Path) -> Result<PathBuf, Strin
         let _ = fs::remove_file(&old_backup);
     }
 
-    fs::rename(&current_exe, &old_backup)
-        .map_err(|e| format!("Could not move current executable aside: {e}"))?;
+    fs::rename(&current_exe, &old_backup).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "This installation is managed in a read-only system directory (such as an RPM or Flatpak). Please update Syllabary using your system package manager.".to_string()
+        } else {
+            format!("Could not move current executable aside: {e}")
+        }
+    })?;
 
     if let Err(e) = fs::rename(new_exe_path, &current_exe) {
         // Attempt rollback so the user is never left without an executable

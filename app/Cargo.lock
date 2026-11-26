@@ -3793,6 +3793,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "spellbook"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d204abcbdf8e88729306a8d0ca01a79d8a49969fe1f84696909d6dbc4321c1a"
+dependencies = [
+ "foldhash 0.2.0",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "spirv"
 version = "0.4.0+sdk-1.4.341.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3852,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "syllabary"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -3869,6 +3879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "spellbook",
  "ureq",
  "windows",
 ]

@@ -11,8 +11,11 @@ use std::collections::BTreeSet;
 pub struct FileTypeSpec {
     pub ext: &'static str,
     pub label: &'static str,
+    #[cfg_attr(not(windows), expect(dead_code, reason = "Windows ProgID registry metadata"))]
     pub prog_id: &'static str,
+    #[cfg_attr(not(windows), expect(dead_code, reason = "Windows ProgID description metadata"))]
     pub description: &'static str,
+    #[cfg_attr(not(windows), expect(dead_code, reason = "Windows executable icon resource index"))]
     pub icon_index: u32,
 }
 
@@ -177,13 +180,106 @@ pub fn apply_default_associations(extensions: &[String]) -> Result<ApplyResult, 
     Ok(result)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "wpx" => "application/x-syllabary",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "pdf" => "application/pdf",
+        "gdoc" => "application/x-syllabary-gdoc",
+        "md" => "text/markdown",
+        "rtf" => "application/rtf",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn apply_default_associations(extensions: &[String]) -> Result<ApplyResult, String> {
     let specs = normalize_selected_extensions(extensions);
     if specs.is_empty() {
         return Err("Check at least one file extension first.".into());
     }
-    Err("Automatic default-app registration is currently supported on Windows.".into())
+
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| "Could not locate XDG user data directory (~/.local/share).".to_string())?;
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Could not determine executable path: {e}"))?;
+    let exe_str = exe_path.to_string_lossy();
+
+    let apps_dir = data_dir.join("applications");
+    std::fs::create_dir_all(&apps_dir)
+        .map_err(|e| format!("Could not create {}: {e}", apps_dir.display()))?;
+
+    let mime_list: String = SUPPORTED_EXTENSIONS
+        .iter()
+        .map(|s| format!("{};", mime_for_ext(s.ext)))
+        .collect();
+    let desktop_content = format!(
+        "[Desktop Entry]\n\
+         Name=Syllabary\n\
+         Comment=Fast, offline desktop word processor and PDF/DOCX studio\n\
+         Exec=\"{exe_str}\" %F\n\
+         Icon=syllabary\n\
+         Terminal=false\n\
+         Type=Application\n\
+         Categories=Office;WordProcessor;\n\
+         MimeType={mime_list}\n\
+         StartupWMClass=Syllabary\n"
+    );
+    let desktop_path = apps_dir.join("syllabary.desktop");
+    std::fs::write(&desktop_path, desktop_content)
+        .map_err(|e| format!("Could not write {}: {e}", desktop_path.display()))?;
+
+    let mime_pkgs = data_dir.join("mime").join("packages");
+    if std::fs::create_dir_all(&mime_pkgs).is_ok() {
+        let mime_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-syllabary">
+    <comment>Syllabary Document</comment>
+    <glob pattern="*.wpx"/>
+  </mime-type>
+  <mime-type type="application/x-syllabary-gdoc">
+    <comment>Google Doc Link</comment>
+    <glob pattern="*.gdoc"/>
+  </mime-type>
+</mime-info>
+"#;
+        let _ = std::fs::write(mime_pkgs.join("syllabary.xml"), mime_xml);
+        let _ = std::process::Command::new("update-mime-database")
+            .arg(data_dir.join("mime"))
+            .status();
+    }
+    let _ = std::process::Command::new("update-desktop-database")
+        .arg(&apps_dir)
+        .status();
+
+    let mut result = ApplyResult::default();
+    for spec in specs {
+        let mime = mime_for_ext(spec.ext);
+        let status = std::process::Command::new("xdg-mime")
+            .args(["default", "syllabary.desktop", mime])
+            .status()
+            .map_err(|e| format!("Could not run xdg-mime (install xdg-utils): {e}"))?;
+        if status.success() {
+            result.registered.push(format!(".{}", spec.ext));
+        }
+    }
+
+    if result.registered.is_empty() {
+        return Err("xdg-mime could not register any of the selected extensions.".into());
+    }
+    Ok(result)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn apply_default_associations(extensions: &[String]) -> Result<ApplyResult, String> {
+    let specs = normalize_selected_extensions(extensions);
+    if specs.is_empty() {
+        return Err("Check at least one file extension first.".into());
+    }
+    Err("Automatic default-app registration is currently supported on Windows and Linux.".into())
 }
 
 /// Returns `true` if `ext` (with or without leading dot) is currently associated with Syllabary.
@@ -203,7 +299,20 @@ pub fn is_registered_default(ext: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn is_registered_default(ext: &str) -> bool {
+    let clean = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    let mime = mime_for_ext(&clean);
+    std::process::Command::new("xdg-mime")
+        .args(["query", "default", mime])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "syllabary.desktop")
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn is_registered_default(_ext: &str) -> bool {
     false
 }

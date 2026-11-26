@@ -12,6 +12,7 @@ pub enum PrintOutcome {
     /// Job was spooled to the native printer subsystem.
     Printed(String),
     /// User cancelled the native print dialog.
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code, reason = "Constructed by Windows PrintDlgW cancellation"))]
     Cancelled,
     /// Native printing failed with a descriptive error.
     Error(String),

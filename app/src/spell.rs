@@ -1,5 +1,6 @@
-//! Offline spell checking through the Windows spell checker that ships with the
-//! operating system (no internet). Results are cached per paragraph text.
+//! Offline spell checking through the OS spell checker on Windows (`ISpellCheckerFactory`)
+//! and system Hunspell dictionaries on Linux (`/usr/share/hunspell` & `/usr/share/myspell`).
+//! Results are cached per paragraph text.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,10 @@ const CACHE_LIMIT: usize = 8000;
 pub struct Speller {
     #[cfg(windows)]
     checker: Option<ISpellChecker>,
+    #[cfg(target_os = "linux")]
+    dict: Option<spellbook::Dictionary>,
+    #[cfg(target_os = "linux")]
+    custom_words: RefCell<HashSet<String>>,
     cache: RefCell<HashMap<String, Vec<(usize, usize)>>>,
     ignored: RefCell<HashSet<String>>,
     pub language: String,
@@ -37,10 +42,86 @@ impl Speller {
             let (checker, language) = unsafe { Self::create() }.unwrap_or((None, String::new()));
             Self { checker, cache: Default::default(), ignored: Default::default(), language }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let (dict, language) = Self::load_linux_hunspell();
+            let custom_words = Self::load_custom_words();
+            Self {
+                dict,
+                custom_words: RefCell::new(custom_words),
+                cache: Default::default(),
+                ignored: Default::default(),
+                language,
+            }
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Self { cache: Default::default(), ignored: Default::default(), language: String::new() }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn custom_dict_path() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join("Syllabary").join("custom_dict.txt"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn load_custom_words() -> HashSet<String> {
+        let Some(path) = Self::custom_dict_path() else {
+            return HashSet::new();
+        };
+        std::fs::read_to_string(path)
+            .map(|s| {
+                s.lines()
+                    .map(|l| l.trim().to_lowercase())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn load_linux_hunspell() -> (Option<spellbook::Dictionary>, String) {
+        let mut tags: Vec<String> = Vec::new();
+        for env_key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+            if let Ok(val) = std::env::var(env_key) {
+                let tag = val.split('.').next().unwrap_or("").split('@').next().unwrap_or("");
+                if !tag.is_empty() && tag != "C" && tag != "POSIX" && !tags.iter().any(|t| t == tag) {
+                    tags.push(tag.to_string());
+                }
+            }
+        }
+        for fallback in ["en_US", "en_GB", "en_AU", "en_CA"] {
+            if !tags.iter().any(|t| t == fallback) {
+                tags.push(fallback.to_string());
+            }
+        }
+
+        let mut search_dirs: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from("/usr/share/hunspell"),
+            std::path::PathBuf::from("/usr/share/myspell"),
+            std::path::PathBuf::from("/usr/local/share/hunspell"),
+        ];
+        if let Some(data_dir) = dirs::data_local_dir() {
+            search_dirs.push(data_dir.join("hunspell"));
+        }
+
+        for tag in &tags {
+            for dir in &search_dirs {
+                let aff_path = dir.join(format!("{tag}.aff"));
+                let dic_path = dir.join(format!("{tag}.dic"));
+                if aff_path.exists() && dic_path.exists() {
+                    let Ok(aff_bytes) = std::fs::read(&aff_path) else { continue };
+                    let Ok(dic_bytes) = std::fs::read(&dic_path) else { continue };
+                    let aff = String::from_utf8_lossy(&aff_bytes);
+                    let dic = String::from_utf8_lossy(&dic_bytes);
+                    if let Ok(dict) = spellbook::Dictionary::new(&aff, &dic) {
+                        return (Some(dict), tag.replace('_', "-"));
+                    }
+                }
+            }
+        }
+        (None, String::new())
     }
 
     #[cfg(windows)]
@@ -72,7 +153,11 @@ impl Speller {
         {
             self.checker.is_some()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.dict.is_some()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             false
         }
@@ -105,7 +190,8 @@ impl Speller {
         v.iter().copied().filter(|(a, b)| !ig.contains(&text[*a..*b].iter().collect::<String>().to_lowercase())).collect()
     }
 
-    #[cfg_attr(not(windows), expect(unused_variables, reason = "Spellchecker COM backend is only available on Windows"))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), expect(unused_variables, reason = "Spellchecker backend is only available on Windows and Linux"))]
+    #[cfg_attr(target_os = "linux", expect(unused_variables, reason = "Linux Hunspell backend iterates char slices directly"))]
     fn check_raw(&self, s: &str, text: &[char]) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         #[cfg(windows)]
@@ -136,10 +222,41 @@ impl Speller {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            let Some(dict) = &self.dict else { return out };
+            let custom = self.custom_words.borrow();
+            let mut i = 0;
+            while i < text.len() {
+                if !text[i].is_alphabetic() {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                while i < text.len()
+                    && (text[i].is_alphabetic()
+                        || ((text[i] == '\'' || text[i] == '\u{2019}')
+                            && i + 1 < text.len()
+                            && text[i + 1].is_alphabetic()))
+                {
+                    i += 1;
+                }
+                let end = i;
+                if end > start {
+                    let word: String = text[start..end]
+                        .iter()
+                        .map(|&c| if c == '\u{2019}' { '\'' } else { c })
+                        .collect();
+                    if !custom.contains(&word.to_lowercase()) && !dict.check(&word) {
+                        out.push((start, end));
+                    }
+                }
+            }
+        }
         out
     }
 
-    #[cfg_attr(not(windows), expect(unused_variables, reason = "Spellchecker COM backend is only available on Windows"))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), expect(unused_variables, reason = "Spellchecker backend is only available on Windows and Linux"))]
     pub fn suggest(&self, word: &str) -> Vec<String> {
         let mut out = Vec::new();
         #[cfg(windows)]
@@ -160,17 +277,38 @@ impl Speller {
                 CoTaskMemFree(Some(buf[0].0 as *const _));
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(dict) = &self.dict {
+                dict.suggest(word, &mut out);
+                out.truncate(MAX_SUGGESTIONS);
+            }
+        }
         out
     }
 
-    /// Add to the computer's own custom dictionary (a local file kept by Windows).
-    #[cfg_attr(not(windows), expect(unused_variables, reason = "Spellchecker COM backend is only available on Windows"))]
+    /// Add to the computer's own custom dictionary (Windows registry/file or `~/.config/Syllabary/custom_dict.txt` on Linux).
+    #[cfg_attr(not(any(windows, target_os = "linux")), expect(unused_variables, reason = "Spellchecker backend is only available on Windows and Linux"))]
     pub fn add(&self, word: &str) {
         #[cfg(windows)]
         // SAFETY: `chk.Add` takes a valid `HSTRING` reference on the initialized COM apartment.
         unsafe {
             if let Some(chk) = &self.checker {
                 let _ = chk.Add(&HSTRING::from(word));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let clean = word.trim().to_lowercase();
+            if !clean.is_empty() && self.custom_words.borrow_mut().insert(clean) {
+                if let Some(path) = Self::custom_dict_path() {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let mut all: Vec<String> = self.custom_words.borrow().iter().cloned().collect();
+                    all.sort();
+                    let _ = std::fs::write(path, all.join("\n") + "\n");
+                }
             }
         }
         self.cache.borrow_mut().clear();

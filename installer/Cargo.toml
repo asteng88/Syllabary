@@ -1,0 +1,26 @@
+[package]
+name = "syllabary-installer"
+version = "0.2.5"
+edition = "2021"
+description = "Cross-platform GUI installer for Syllabary (Windows & Linux)"
+
+[[bin]]
+name = "syllabary-installer"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.37"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+ureq = "3"
+sha2 = "0.10"
+dirs = "7"
+rfd = "0.17"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

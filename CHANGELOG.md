@@ -2,6 +2,21 @@
 
 All notable changes to **Syllabary** are documented in this file.
 
+## [0.2.5] - 2026-11-26
+
+### Added
+- **Full Linux & Fedora Port:**
+  - Added a pure-Rust offline Hunspell spell-checking backend (`spellbook`) on Linux (`spell.rs`) that automatically loads system dictionaries from `/usr/share/hunspell`, `/usr/share/myspell`, and `~/.local/share/hunspell` and persists custom words to `~/.config/Syllabary/custom_dict.txt`.
+  - Added Linux/Fedora font discovery (`fonts.rs`), including `~/.local/share/fonts`, `/usr/share/syllabary/fonts`, Fedora emoji/symbol paths (`google-noto-emoji-color-fonts`, `dejavu-sans-fonts`, `gdouros-symbola`), and automatic bundled open-source font fallbacks when Windows system fonts are absent.
+  - Implemented per-user Linux XDG file associations (`file_assoc.rs`) and updated `syllabary.desktop` with `.wpx` and `.odt` MIME types.
+  - Guarded Windows-only resource compilation in `app/build.rs` and added clear read-only install messaging in `updater.rs` for RPM/Flatpak installs.
+- **Cross-Platform Syllabary Installer (`installer/`):**
+  - Built a standalone native GUI installer (`syllabary-installer.exe` for Windows, `syllabary-installer-linux` for Linux/Fedora) with a dedicated Obsidian + Emerald download-badge installer icon.
+  - Downloads the latest GitHub release over HTTPS with live progress and SHA-256 verification (plus a local-binary fallback).
+  - Installs to standard per-user paths (`%LOCALAPPDATA%\Programs\Syllabary` on Windows, `~/.local/bin/syllabary` on Linux with `chmod +x` and SELinux `restorecon`), registers Syllabary in **Applications → Office** on Linux and **Start Menu / Installed Apps** on Windows, optionally creates a Desktop shortcut and default file associations, and supports one-click updating and uninstalling.
+
+---
+
 ## [0.2.4] - 2026-11-25
 
 ### Added
