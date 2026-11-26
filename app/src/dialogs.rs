@@ -618,11 +618,24 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 ui.label("• Checklists, Markdown auto-formatting, Pageless mode & Version History");
                 ui.label("• Comments, Suggesting mode, Links, Bookmarks, Citations & Live Word Count");
                 ui.label("• Works 100% offline on this computer — no cloud account or internet connection needed.");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Created by");
+                    ui.strong("asteng88");
+                    ui.label("—");
+                    ui.hyperlink_to("studio88retro.com", "https://studio88retro.com");
+                });
                 ui.add_space(8.0);
-                if ui.button("Check for Updates…").clicked() {
-                    app.act(Action::CheckForUpdates);
-                    close = true;
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Check for Updates…").clicked() {
+                        app.act(Action::CheckForUpdates);
+                        close = true;
+                    }
+                    if ui.button("Show Splash Screen").clicked() {
+                        app.splash.replay();
+                        close = true;
+                    }
+                });
             });
             if close {
                 open = false;

@@ -11,6 +11,7 @@ mod pdf_import;
 mod print;
 mod rtf;
 mod spell;
+mod splash;
 mod table_math;
 mod editor;
 mod file_assoc;

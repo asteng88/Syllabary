@@ -344,6 +344,7 @@ pub struct App {
     pub assoc_status_msg: Option<(bool, String)>,
     pub doc_load: Option<DocLoadJob>,
     pub doc_load_queue: Vec<PathBuf>,
+    pub splash: crate::splash::SplashState,
 }
 
 impl App {
@@ -356,6 +357,8 @@ impl App {
         }
         let theme = if cfg.dark { Theme::dark() } else { Theme::light() };
         theme.apply(&cc.egui_ctx);
+        let show_splash = (screenshot.is_none() && std::env::var("SYLLABARY_NO_SPLASH").is_err())
+            || std::env::var("SYLLABARY_SHOW_SPLASH").is_ok();
         let mut app = Self {
             egui_ctx: cc.egui_ctx.clone(),
             tabs: Vec::new(),
@@ -409,6 +412,7 @@ impl App {
             assoc_status_msg: None,
             doc_load: None,
             doc_load_queue: Vec::new(),
+            splash: crate::splash::SplashState::new(show_splash),
         };
         crate::updater::cleanup_old_executable_backup();
         if app.screenshot.is_none()
@@ -3906,6 +3910,7 @@ impl eframe::App for App {
 
         dialogs::show(self, &ctx);
         self.draw_doc_loading_overlay(&ctx, &th);
+        self.splash.show(&ctx);
 
         let mr_pal = self.mr_palette();
         self.toasts.show(&ctx, &mr_pal);
@@ -3985,6 +3990,7 @@ mod tests {
             assoc_status_msg: None,
             doc_load: None,
             doc_load_queue: Vec::new(),
+            splash: crate::splash::SplashState::new(false),
         };
 
         // Simulate fullscreen -> windowed -> narrow window resize sequence
